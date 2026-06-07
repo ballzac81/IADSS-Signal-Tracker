@@ -29,7 +29,7 @@ services:
   # ── Freqtrade ───────────────────────────────────────────────────────────────
   freqtrade:
     image: freqtradeorg/freqtrade:stable
-    container_name: IADSS_freqtrade
+    container_name: freqtrade
     restart: unless-stopped
     # No public port — Caddy is the only ingress point
     expose:
@@ -49,7 +49,7 @@ services:
   # ── Signal Tracker ──────────────────────────────────────────────────────────
   signal-tracker:
     build: .
-    container_name: IADSS_signal_tracker
+    container_name: signal-tracker
     restart: unless-stopped
     # No public port — Caddy is the only ingress point
     expose:
