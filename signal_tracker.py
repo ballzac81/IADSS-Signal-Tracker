@@ -4,7 +4,8 @@ A TradingView webhook signal sequencer for Freqtrade.
 Listens for 3 signals in order within a time window, then executes a trade.
 
 State is persisted in Redis (preferred) or a local JSON file so the sequence
-survives container restarts.
+survives container restarts. State is keyed per pair+direction so multiple
+pairs can run independent sequences simultaneously.
 """
 
 import os
@@ -39,9 +40,13 @@ TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT   = os.environ.get("TELEGRAM_CHAT_ID", "")
 REDIS_URL       = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 STATE_FILE      = os.environ.get("STATE_FILE", "/data/state.json")
+TRADING_PAIR    = os.environ.get("TRADING_PAIR", "SOL/USD")
 
 # ---------------------------------------------------------------------------
 # State persistence — Redis preferred, local file as fallback
+# State is stored per (direction, pair) so multiple pairs don't interfere.
+#   Redis key:  iadss:{direction}:{pair}   e.g. iadss:buy:SOL/USD
+#   File key:   "{direction}:{pair}"       stored in a flat dict in state.json
 # ---------------------------------------------------------------------------
 USE_REDIS = False
 _redis = None
@@ -55,44 +60,58 @@ try:
 except Exception as e:
     logger.warning("Redis unavailable (%s), falling back to file: %s", e, STATE_FILE)
 
-REDIS_KEY = "iadss:state"
 
-_DEFAULT_STATE = lambda: {
-    "buy":  {"step": 0, "ts": 0.0, "pair": None},
-    "sell": {"step": 0, "ts": 0.0, "pair": None},
-}
+def _default_seq() -> dict:
+    return {"step": 0, "ts": 0.0, "pair": None}
 
 
-def load_state() -> dict:
-    if USE_REDIS:
-        try:
-            raw = _redis.get(REDIS_KEY)
-            if raw:
-                return json.loads(raw)
-        except Exception as e:
-            logger.error("Redis read error: %s", e)
-    else:
-        try:
-            with open(STATE_FILE) as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-    return _DEFAULT_STATE()
+def _redis_key(direction: str, pair: str) -> str:
+    return f"iadss:{direction}:{pair}"
 
 
-def save_state(state: dict) -> None:
-    if USE_REDIS:
-        try:
-            _redis.set(REDIS_KEY, json.dumps(state))
-            return
-        except Exception as e:
-            logger.error("Redis write error: %s — falling back to file", e)
-    # File fallback — atomic write
+def _file_key(direction: str, pair: str) -> str:
+    return f"{direction}:{pair}"
+
+
+def _load_file_state() -> dict:
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_file_state(state: dict) -> None:
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(state, f)
     os.replace(tmp, STATE_FILE)
+
+
+def load_seq(direction: str, pair: str) -> dict:
+    if USE_REDIS:
+        try:
+            raw = _redis.get(_redis_key(direction, pair))
+            if raw:
+                return json.loads(raw)
+        except Exception as e:
+            logger.error("Redis read error: %s", e)
+    else:
+        return _load_file_state().get(_file_key(direction, pair), _default_seq())
+    return _default_seq()
+
+
+def save_seq(direction: str, pair: str, seq: dict) -> None:
+    if USE_REDIS:
+        try:
+            _redis.set(_redis_key(direction, pair), json.dumps(seq))
+            return
+        except Exception as e:
+            logger.error("Redis write error: %s — falling back to file", e)
+    state = _load_file_state()
+    state[_file_key(direction, pair)] = seq
+    _save_file_state(state)
 
 
 # ---------------------------------------------------------------------------
@@ -103,12 +122,11 @@ app = Flask(__name__)
 limiter = Limiter(
     get_remote_address,
     app=app,
-    # Conservative global default — webhook endpoints get their own stricter limit
     default_limits=["200 per hour"],
     storage_uri=REDIS_URL if USE_REDIS else "memory://",
 )
 
-WEBHOOK_LIMIT = "20 per minute"   # TradingView fires at most once per candle
+WEBHOOK_LIMIT = "20 per minute"
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +174,7 @@ def telegram(msg: str) -> None:
 # ---------------------------------------------------------------------------
 # Freqtrade API helper
 # ---------------------------------------------------------------------------
-def freqtrade(method: str, endpoint: str, **kwargs):
+def freqtrade_api(method: str, endpoint: str, **kwargs):
     try:
         resp = requests.request(
             method,
@@ -177,43 +195,44 @@ def freqtrade(method: str, endpoint: str, **kwargs):
 # ---------------------------------------------------------------------------
 def advance(direction: str, step: int, pair: str) -> tuple[bool, str]:
     """
-    Advance the sequence for direction ('buy' or 'sell') to the given step.
+    Advance the sequence for (direction, pair) to the given step.
+    Each pair has its own independent sequence — no cross-pair interference.
     Returns (success, reason).
     """
-    state = load_state()
-    seq = state[direction]
+    seq = load_seq(direction, pair)
     now = time.time()
 
     # Expire check
     if seq["step"] > 0 and (now - seq["ts"]) > WINDOW_SECONDS:
-        logger.info("[%s] window expired — resetting", direction)
-        old_pair = seq.get("pair", pair)
-        seq = {"step": 0, "ts": 0.0, "pair": None}
-        state[direction] = seq
-        save_state(state)
-        telegram(f"⏰ IADSS {direction.upper()} window expired for {old_pair} — sequence reset")
+        logger.info("[%s][%s] window expired — resetting", direction, pair)
+        save_seq(direction, pair, _default_seq())
+        telegram(f"⏰ IADSS {direction.upper()} window expired for {pair} — sequence reset")
+        seq = _default_seq()
+
+    # Pair consistency check — reject if a different pair is mid-sequence
+    # (Shouldn't happen with per-pair keys, but defence in depth)
+    if seq["step"] > 0 and seq.get("pair") and seq["pair"] != pair:
+        logger.warning("[%s] pair mismatch (active: %s, incoming: %s) — ignoring",
+                       direction, seq["pair"], pair)
+        return False, "pair_mismatch"
 
     expected = seq["step"] + 1
     if step != expected:
-        logger.info("[%s] step %d out of order (expected %d) — resetting", direction, step, expected)
-        state[direction] = {"step": 0, "ts": 0.0, "pair": None}
-        save_state(state)
+        logger.info("[%s][%s] step %d out of order (expected %d) — resetting",
+                    direction, pair, step, expected)
+        save_seq(direction, pair, _default_seq())
         return False, "out_of_order"
 
-    state[direction] = {"step": step, "ts": now, "pair": pair}
-    save_state(state)
+    save_seq(direction, pair, {"step": step, "ts": now, "pair": pair})
     return True, "ok"
 
 
-def reset(direction: str) -> None:
-    state = load_state()
-    state[direction] = {"step": 0, "ts": 0.0, "pair": None}
-    save_state(state)
+def reset_seq(direction: str, pair: str) -> None:
+    save_seq(direction, pair, _default_seq())
 
 
-def window_remaining(direction: str) -> int:
-    state = load_state()
-    seq = state[direction]
+def window_remaining(direction: str, pair: str) -> int:
+    seq = load_seq(direction, pair)
     if seq["step"] == 0:
         return WINDOW_SECONDS
     elapsed = time.time() - seq["ts"]
@@ -224,12 +243,12 @@ def window_remaining(direction: str) -> int:
 # Trade execution
 # ---------------------------------------------------------------------------
 def execute_buy(pair: str) -> bool:
-    result = freqtrade("POST", "/forcebuy", json={"pair": pair})
+    result = freqtrade_api("POST", "/forcebuy", json={"pair": pair})
     if result:
         msg = f"🟢 IADSS BUY executed: {pair}"
         logger.info(msg)
         telegram(msg)
-        reset("buy")
+        reset_seq("buy", pair)
         return True
     logger.error("BUY failed for %s", pair)
     telegram(f"❌ IADSS BUY FAILED: {pair} — check logs")
@@ -237,8 +256,8 @@ def execute_buy(pair: str) -> bool:
 
 
 def execute_sell(pair: str) -> bool:
-    """Sell 50 % of the first open position for the pair."""
-    trades = freqtrade("GET", "/status")
+    """Sell 50% of the first open position for the pair."""
+    trades = freqtrade_api("GET", "/status")
     if not trades:
         logger.error("Could not retrieve open trades")
         return False
@@ -247,23 +266,23 @@ def execute_sell(pair: str) -> bool:
     if not pair_trades:
         logger.warning("No open trade for %s", pair)
         telegram(f"⚠️ IADSS SELL triggered for {pair} but no open trade found")
-        reset("sell")
+        reset_seq("sell", pair)
         return False
 
     trade = pair_trades[0]
     trade_id = str(trade["trade_id"])
     amount = trade.get("amount", 0) * 0.5
 
-    result = freqtrade("POST", "/forcesell", json={
+    result = freqtrade_api("POST", "/forcesell", json={
         "tradeid": trade_id,
         "ordertype": "market",
         "amount": amount,
     })
     if result:
-        msg = f"🔴 IADSS SELL executed (50 %): {pair}"
+        msg = f"🔴 IADSS SELL executed (50%): {pair}"
         logger.info(msg)
         telegram(msg)
-        reset("sell")
+        reset_seq("sell", pair)
         return True
     logger.error("SELL failed for %s", pair)
     telegram(f"❌ IADSS SELL FAILED: {pair} — check logs")
@@ -280,8 +299,7 @@ def mr_buy(data):
     pair = data.get("pair", "UNKNOWN")
     ok, reason = advance("buy", 1, pair)
     if ok:
-        remaining = window_remaining("buy")
-        telegram(f"📍 BUY 1/3: Mean Reversion — {pair} (window: {remaining // 3600}h)")
+        telegram(f"📍 BUY 1/3: Mean Reversion — {pair} (window: {window_remaining('buy', pair) // 3600}h)")
     return jsonify({"status": "ok" if ok else "reset", "reason": reason})
 
 
@@ -292,8 +310,7 @@ def confirm_buy(data):
     pair = data.get("pair", "UNKNOWN")
     ok, reason = advance("buy", 2, pair)
     if ok:
-        remaining = window_remaining("buy")
-        telegram(f"📍 BUY 2/3: Confirmation — {pair} (window: {remaining // 3600}h)")
+        telegram(f"📍 BUY 2/3: Confirmation — {pair} (window: {window_remaining('buy', pair) // 3600}h)")
     return jsonify({"status": "ok" if ok else "reset", "reason": reason})
 
 
@@ -320,8 +337,7 @@ def mr_sell(data):
     pair = data.get("pair", "UNKNOWN")
     ok, reason = advance("sell", 1, pair)
     if ok:
-        remaining = window_remaining("sell")
-        telegram(f"📍 SELL 1/3: Mean Reversion — {pair} (window: {remaining // 3600}h)")
+        telegram(f"📍 SELL 1/3: Mean Reversion — {pair} (window: {window_remaining('sell', pair) // 3600}h)")
     return jsonify({"status": "ok" if ok else "reset", "reason": reason})
 
 
@@ -332,8 +348,7 @@ def confirm_sell(data):
     pair = data.get("pair", "UNKNOWN")
     ok, reason = advance("sell", 2, pair)
     if ok:
-        remaining = window_remaining("sell")
-        telegram(f"📍 SELL 2/3: Confirmation — {pair} (window: {remaining // 3600}h)")
+        telegram(f"📍 SELL 2/3: Confirmation — {pair} (window: {window_remaining('sell', pair) // 3600}h)")
     return jsonify({"status": "ok" if ok else "reset", "reason": reason})
 
 
@@ -352,24 +367,24 @@ def lb_sell(data):
 
 # ---------------------------------------------------------------------------
 # Status endpoint — token-protected
-# Usage: GET /status?token=YOUR_SECRET_TOKEN
+# Usage: GET /status?token=YOUR_SECRET_TOKEN[&pair=SOL/USD]
+# Defaults to TRADING_PAIR env var if no pair specified.
 # ---------------------------------------------------------------------------
 @app.route("/status", methods=["GET"])
 @limiter.limit("60 per hour")
 @require_token_query
 def status():
-    state = load_state()
+    pair = request.args.get("pair", TRADING_PAIR)
     now = time.time()
-    result = {}
+    result = {"pair": pair}
     for direction in ("buy", "sell"):
-        seq = state.get(direction, {})
+        seq = load_seq(direction, pair)
         step = seq.get("step", 0)
         ts = seq.get("ts", 0.0)
         elapsed = int(now - ts) if step > 0 else 0
         remaining = max(0, WINDOW_SECONDS - elapsed) if step > 0 else WINDOW_SECONDS
         result[direction] = {
             "step": step,
-            "pair": seq.get("pair"),
             "elapsed_seconds": elapsed,
             "remaining_seconds": remaining,
             "window_expired": step > 0 and elapsed > WINDOW_SECONDS,
@@ -380,8 +395,7 @@ def status():
 
 
 # ---------------------------------------------------------------------------
-# Health check — intentionally unauthenticated (used by Docker healthcheck)
-# Only reveals that the service is running, nothing sensitive
+# Health check — unauthenticated (used by Docker healthcheck only)
 # ---------------------------------------------------------------------------
 @app.route("/health", methods=["GET"])
 @limiter.exempt

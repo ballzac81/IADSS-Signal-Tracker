@@ -17,7 +17,6 @@
 {$SIGNAL_DOMAIN} {
     reverse_proxy signal-tracker:5000
 
-    # Log to a file (rotated by Caddy automatically)
     log {
         output file /data/logs/caddy-signal.log {
             roll_size 10mb
@@ -27,7 +26,7 @@
     }
 
     # Block anything that's not a known IADSS endpoint
-    @allowed_paths path /mr-buy /signal-buy /trend-buy /mr-sell /signal-sell /trend-sell /status /health
+    @allowed_paths path /mr-buy /confirm-buy /lb-buy /mr-sell /confirm-sell /lb-sell /status /health
     handle @allowed_paths {
         reverse_proxy signal-tracker:5000
     }
