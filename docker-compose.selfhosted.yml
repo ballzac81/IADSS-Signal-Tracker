@@ -4,12 +4,31 @@
 #
 # Prerequisites:
 #   1. Copy .env.example to .env and fill in your values  (or run ./setup.sh)
-#   2. Create a Cloudflare Tunnel and add CLOUDFLARE_TUNNEL_TOKEN to .env
-#      See README Part 1B for full instructions.
+#   2. Choose your Cloudflare Tunnel option below (A or B)
 #   3. Run: docker compose -f docker-compose.selfhosted.yml up -d
 #
 # Unraid auto-start on boot — add to /boot/config/go:
-#   cd /root/IADSS-Signal-Tracker && docker compose -f docker-compose.selfhosted.yml up -d
+#   cd /mnt/user/appdata/IADSS-Signal-Tracker && docker compose -f docker-compose.selfhosted.yml up -d
+#
+# ── Cloudflare Tunnel options ────────────────────────────────────────────────
+#
+# OPTION A — You already have a Cloudflare Tunnel container running on Unraid
+#   (e.g. the figro/unraid-cloudflared-tunnel Community App)
+#   1. Set DOCKER_NETWORK in .env to your tunnel container's Docker network name
+#      On Unraid: check the container template — Network Type field
+#   2. The cloudflared service below stays commented out
+#   3. Your tunnel public hostnames in Cloudflare must point to:
+#        signals.yourdomain.com  →  http://signal-tracker:5000
+#        trade.yourdomain.com    →  http://freqtrade:8080
+#
+# OPTION B — You don't have cloudflared running yet (fresh setup)
+#   1. Go to Cloudflare Zero Trust → Networks → Tunnels → Create tunnel
+#   2. Copy the token and add it to .env as CLOUDFLARE_TUNNEL_TOKEN
+#   3. Uncomment the cloudflared service at the bottom of this file
+#   4. Remove the networks sections from all services and the bottom of this file
+#   5. Your tunnel public hostnames in Cloudflare must point to:
+#        signals.yourdomain.com  →  http://signal-tracker:5000
+#        trade.yourdomain.com    →  http://freqtrade:8080
 
 services:
 
@@ -19,7 +38,9 @@ services:
     image: redis:7-alpine
     container_name: IADSS_redis
     restart: unless-stopped
-    # No public ports — internal network only
+    # No public ports — Cloudflare Tunnel is the only ingress
+    networks:
+      - tunnel_network
     volumes:
       - redis_data:/data
     command: redis-server --save 60 1 --loglevel warning
@@ -32,11 +53,11 @@ services:
   # ── Freqtrade ───────────────────────────────────────────────────────────────
   freqtrade:
     image: freqtradeorg/freqtrade:stable
-    container_name: IADSS_freqtrade
+    container_name: freqtrade
     restart: unless-stopped
     # No public ports — Cloudflare Tunnel is the only ingress
-    expose:
-      - "8080"
+    networks:
+      - tunnel_network
     volumes:
       - ./user_data:/freqtrade/user_data
     command: >
@@ -52,11 +73,11 @@ services:
   # ── Signal Tracker ──────────────────────────────────────────────────────────
   signal-tracker:
     build: .
-    container_name: IADSS_signal_tracker
+    container_name: signal-tracker
     restart: unless-stopped
     # No public ports — Cloudflare Tunnel is the only ingress
-    expose:
-      - "5000"
+    networks:
+      - tunnel_network
     environment:
       - SECRET_TOKEN=${SECRET_TOKEN}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
@@ -65,7 +86,7 @@ services:
       - FREQTRADE_USER=admin
       - FREQTRADE_PASS=${FREQTRADE_PASS}
       - WINDOW_SECONDS=${WINDOW_SECONDS:-144000}
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://IADSS_redis:6379/0
     volumes:
       - signal_data:/data
     depends_on:
@@ -79,28 +100,33 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── Cloudflare Tunnel ────────────────────────────────────────────────────────
+  # ── Cloudflare Tunnel (OPTION B only — uncomment if you don't have cloudflared running) ──
   # Creates a secure outbound-only connection from your home network to
   # Cloudflare's edge. No open ports, no port forwarding, works behind CGNAT.
   # Cloudflare terminates HTTPS — your services are exposed via your subdomains.
   #
-  # To get your token:
-  #   1. Go to Cloudflare Zero Trust → Networks → Tunnels → Create tunnel
-  #   2. Copy the token and add it to .env as CLOUDFLARE_TUNNEL_TOKEN
-  #   3. In the tunnel config, add two Public Hostnames:
-  #      signals.yourdomain.com  →  http://signal-tracker:5000
-  #      trade.yourdomain.com    →  http://freqtrade:8080
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: IADSS_cloudflared
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-    depends_on:
-      signal-tracker:
-        condition: service_healthy
-      freqtrade:
-        condition: service_started
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: IADSS_cloudflared
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     signal-tracker:
+  #       condition: service_healthy
+  #     freqtrade:
+  #       condition: service_started
+
+networks:
+  tunnel_network:
+    # OPTION A — join your existing Cloudflare Tunnel container's Docker network.
+    # Set DOCKER_NETWORK in .env to match your network name (e.g. ballzac, br0, macvlan).
+    # On Unraid: check your cloudflared container template → Network Type field.
+    #
+    # OPTION B — delete this networks section if using the bundled cloudflared above.
+    name: ${DOCKER_NETWORK}
+    external: true
 
 volumes:
   redis_data:    # Redis RDB snapshots — signal state survives restarts
   signal_data:   # Signal tracker file-based state fallback
+

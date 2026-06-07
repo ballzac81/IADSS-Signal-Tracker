@@ -69,17 +69,26 @@ read -rp "  Signal tracker domain (e.g. signals.yourdomain.com): " SIGNAL_DOMAIN
 read -rp "  Freqtrade UI domain   (e.g. trade.yourdomain.com):   " FREQTRADE_DOMAIN
 [ -z "$FREQTRADE_DOMAIN" ] && err "Freqtrade domain cannot be blank"
 
-# ── Cloudflare tunnel token (self-hosted only) ────────────────────────────────
+# ── Cloudflare tunnel token + Docker network (self-hosted only) ───────────────
 CF_TOKEN=""
+DOCKER_NETWORK=""
 if [ "$SETUP_PATH" = "selfhosted" ]; then
     echo ""
     echo "Cloudflare Tunnel"
     echo "─────────────────"
-    info "Go to Cloudflare Zero Trust → Networks → Tunnels → Create tunnel"
-    info "Copy the token shown in the installation step."
+    info "If you have an existing Cloudflare Tunnel container running, leave token blank."
+    info "Otherwise go to Cloudflare Zero Trust → Networks → Tunnels → Create tunnel."
     echo ""
-    read -rp "  Tunnel token: " CF_TOKEN
-    [ -z "$CF_TOKEN" ] && err "Cloudflare tunnel token cannot be blank for self-hosted setup"
+    read -rp "  Tunnel token (or press Enter to skip if already running): " CF_TOKEN
+
+    echo ""
+    echo "Docker network"
+    echo "──────────────"
+    info "The Docker network your Cloudflare Tunnel container runs on."
+    info "On Unraid: Settings → Docker → your custom network name"
+    echo ""
+    read -rp "  Docker network name (or press Enter to skip if using bundled cloudflared): " DOCKER_NETWORK
+    [ -z "$DOCKER_NETWORK" ] && warn "No network set — make sure to uncomment the cloudflared service in docker-compose.selfhosted.yml"
 fi
 
 # ── Exchange ──────────────────────────────────────────────────────────────────
@@ -131,6 +140,7 @@ SETUP_PATH=$SETUP_PATH
 SIGNAL_DOMAIN=$SIGNAL_DOMAIN
 FREQTRADE_DOMAIN=$FREQTRADE_DOMAIN
 CLOUDFLARE_TUNNEL_TOKEN=$CF_TOKEN
+DOCKER_NETWORK=$DOCKER_NETWORK
 
 SECRET_TOKEN=$SECRET_TOKEN
 FREQTRADE_PASS=$FREQTRADE_PASS
@@ -153,22 +163,4 @@ ok ".env written"
 mkdir -p user_data/strategies user_data/logs user_data/data
 ok "user_data/ directories created"
 
-# ── Generate user_data/config.json ───────────────────────────────────────────
-python3 - << PYEOF
-import json, os, sys
-
-try:
-    with open('config.json') as f:
-        cfg = json.load(f)
-except FileNotFoundError:
-    print('config.json not found — skipping', file=sys.stderr)
-    sys.exit(0)
-
-cfg['exchange']['name']           = '$EXCHANGE'
-cfg['exchange']['key']            = '$API_KEY'
-cfg['exchange']['secret']         = '$API_SECRET'
-cfg['exchange']['pair_whitelist'] = ['$PAIR']
-
-cfg['telegram']['token']   = '$TG_TOKEN'
-cfg['telegram']['chat_id'] = '$TG_CHAT'
-cfg['teleg
+# ── Generate user_data/config.json ──────────────────────────────────────────
