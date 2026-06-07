@@ -120,6 +120,7 @@ def advance(direction: str, step: int, pair: str) -> tuple:
     # Refresh the timestamp so the window doesn't expire on slow-moving signals
     if step == seq["step"]:
         save_seq(direction, pair, {"step": step, "ts": now, "pair": pair})
+        logger.info("[%s][%s] repeat step %d — refreshing timestamp", direction, pair, step)
         return False, "repeat"
 
     expected = seq["step"] + 1
