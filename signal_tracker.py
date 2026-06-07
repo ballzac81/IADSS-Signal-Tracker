@@ -116,6 +116,12 @@ def advance(direction: str, step: int, pair: str) -> tuple:
         logger.warning("[%s] pair mismatch (%s vs %s) -- resetting", direction, seq["pair"], pair)
         return False, "pair_mismatch"
 
+    # Allow repeat of the current step (indicator re-fires before fully turning)
+    # Refresh the timestamp so the window doesn't expire on slow-moving signals
+    if step == seq["step"]:
+        save_seq(direction, pair, {"step": step, "ts": now, "pair": pair})
+        return False, "repeat"
+
     expected = seq["step"] + 1
     if step != expected:
         save_seq(direction, pair, _default_seq())
