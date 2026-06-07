@@ -116,7 +116,7 @@ PAIR="${PAIR:-SOL/USD}"
 echo ""
 echo "Signal window"
 echo "─────────────"
-echo "  4h × 10 candles = 144000 s | 1h × 10 candles = 36000 s"
+echo "  4h x 10 candles = 144000 s | 1h x 10 candles = 36000 s"
 read -rp "  WINDOW_SECONDS [144000]: " WINDOW
 WINDOW="${WINDOW:-144000}"
 
@@ -163,4 +163,96 @@ ok ".env written"
 mkdir -p user_data/strategies user_data/logs user_data/data
 ok "user_data/ directories created"
 
-# ── Generate user_data/config.json ──────────────────────────────────────────
+# ── Generate user_data/config.json ───────────────────────────────────────────
+# Uses sed so python3 is not required (works on Unraid and minimal systems)
+if [ -f config.json ]; then
+    _escape() { printf '%s' "$1" | sed 's/[\/&]/\\&/g'; }
+    EXCHANGE_ESC=$(_escape "$EXCHANGE")
+    API_KEY_ESC=$(_escape "$API_KEY")
+    API_SECRET_ESC=$(_escape "$API_SECRET")
+    PAIR_ESC=$(_escape "$PAIR")
+    TG_TOKEN_ESC=$(_escape "$TG_TOKEN")
+    TG_CHAT_ESC=$(_escape "$TG_CHAT")
+    FREQTRADE_PASS_ESC=$(_escape "$FREQTRADE_PASS")
+    FREQTRADE_JWT_ESC=$(_escape "$FREQTRADE_JWT")
+
+    if [ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ]; then
+        TG_ENABLED="true"
+    else
+        TG_ENABLED="false"
+    fi
+
+    sed \
+        -e "s/YOUR_EXCHANGE_API_KEY/$API_KEY_ESC/" \
+        -e "s/YOUR_EXCHANGE_API_SECRET/$API_SECRET_ESC/" \
+        -e "s/\"name\": \"kraken\"/\"name\": \"$EXCHANGE_ESC\"/" \
+        -e "s/\"SOL\/USD\"/\"$PAIR_ESC\"/g" \
+        -e "s/YOUR_TELEGRAM_BOT_TOKEN/$TG_TOKEN_ESC/" \
+        -e "s/YOUR_TELEGRAM_CHAT_ID/$TG_CHAT_ESC/" \
+        -e "s/\"enabled\": true/\"enabled\": $TG_ENABLED/" \
+        -e "s/CHANGE_THIS_TO_YOUR_PASSWORD/$FREQTRADE_PASS_ESC/" \
+        -e "s/CHANGE_THIS_TO_RANDOM_32_CHAR_STRING/$FREQTRADE_JWT_ESC/" \
+        config.json > user_data/config.json
+    ok "user_data/config.json generated"
+else
+    warn "config.json not found — skipping user_data/config.json generation"
+fi
+
+# ── Copy strategy ─────────────────────────────────────────────────────────────
+if [ -f strategies/WebhookStrategy.py ]; then
+    cp strategies/WebhookStrategy.py user_data/strategies/
+    ok "WebhookStrategy.py copied"
+fi
+
+# ── Gitignore .env ────────────────────────────────────────────────────────────
+if [ -f .gitignore ]; then
+    grep -q '^\.env$' .gitignore || echo '.env' >> .gitignore
+else
+    echo '.env' > .gitignore
+fi
+ok ".env added to .gitignore"
+
+# ── Determine compose file ────────────────────────────────────────────────────
+if [ "$SETUP_PATH" = "selfhosted" ]; then
+    COMPOSE_CMD="docker compose -f docker-compose.selfhosted.yml"
+else
+    COMPOSE_CMD="docker compose"
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo ""
+echo "═══════════════════════════════════════════"
+echo -e "   ${GREEN}Setup complete!${NC}"
+echo "═══════════════════════════════════════════"
+echo ""
+
+if [ "$SETUP_PATH" = "vps" ]; then
+    echo "  Before starting, make sure:"
+    echo "  • $SIGNAL_DOMAIN → this server's public IP (DNS A record)"
+    echo "  • $FREQTRADE_DOMAIN → this server's public IP (DNS A record)"
+    echo "  • Ports 80 and 443 are open in your firewall"
+    echo ""
+else
+    echo "  Before starting, make sure:"
+    echo "  • Cloudflare tunnel is Active in your Zero Trust dashboard"
+    echo "  • Public Hostnames are configured in the tunnel:"
+    echo "    $SIGNAL_DOMAIN  → http://signal-tracker:5000"
+    echo "    $FREQTRADE_DOMAIN → http://freqtrade:8080"
+    echo ""
+fi
+
+echo "  Freqtrade UI:  https://$FREQTRADE_DOMAIN"
+echo "  Username:      admin"
+echo "  Password:      $FREQTRADE_PASS"
+echo ""
+echo "  Signal status: https://$SIGNAL_DOMAIN/status?token=$SECRET_TOKEN"
+echo ""
+echo "  TradingView webhook example:"
+echo "  https://$SIGNAL_DOMAIN/mr-buy"
+echo ""
+echo "  Running in DRY RUN mode."
+echo "  To go live: edit user_data/config.json → set dry_run: false → restart"
+echo ""
+echo "  Start:  $COMPOSE_CMD up -d"
+echo "  Logs:   $COMPOSE_CMD logs -f"
+echo ""
