@@ -1,399 +1,294 @@
 # IADSS Signal Tracker
 
-A TradingView webhook sequencer for [Freqtrade](https://www.freqtrade.io).
+A TradingView webhook receiver that executes trades on Freqtrade when the
+[IADSS Confluence Monitor](https://www.tradingview.com/script/GzeIM5db-IADSS-Confluence-Monitor/)
+by [Gregusm](https://www.tradingview.com/u/gregusm/) fires a complete buy or sell sequence.
 
-Listens for **three independent TradingView signals** that must fire in the correct order within a time window before a trade is placed. If they fire out of order or the window expires, the sequence resets — no trade is made.
-
-Signal state is persisted in Redis so a container restart never loses progress mid-sequence.
+The indicator handles all signal sequencing (Mean Reversion → Confluence → Trend flip)
+directly on the chart. This server receives the final alerts and executes trades via
+the Freqtrade API — no server-side state machine required.
 
 ---
 
 ## How it works
 
-```
-Step 1 → Mean Reversion signal fires     (/mr-buy or /mr-sell)
-Step 2 → Confirmation signal fires       (/confirm-buy or /confirm-sell)
-Step 3 → Trend/breakout signal fires     (/lb-buy or /lb-sell)  ← trade executes
-```
+1. Add Gregusm's **IADSS Confluence Monitor** to your TradingView chart
+2. The indicator monitors three layers internally and fires alerts when a full sequence completes
+3. TradingView sends a webhook to this server
+4. The server calls the Freqtrade API to execute the trade
 
-All three must fire **in order** within `WINDOW_SECONDS` (default: 144000 s = 40 hours on a 4h chart).
-If they arrive out of order or the window expires, the counter resets.
+**BUY flow:** Indicator fires `BUY Sequence Complete` → `/lb-buy` → buys 50% of free balance
+
+**SELL flow:** Indicator fires `SELL Sequence Complete` → `/lb-sell` → sells 50% of open position
 
 ---
 
 ## Webhook endpoints
 
-| Endpoint | Step | Direction |
-|----------|------|-----------|
-| `/mr-buy` | 1 | Buy — mean reversion long signal |
-| `/confirm-buy` | 2 | Buy — confluence/confirmation |
-| `/lb-buy` | 3 | Buy — trend/breakout (triggers trade) |
-| `/mr-sell` | 1 | Sell — mean reversion short signal |
-| `/confirm-sell` | 2 | Sell — confluence/confirmation |
-| `/lb-sell` | 3 | Sell — trend/breakout (triggers 50% exit) |
-| `/status` | — | Check current sequence state (token required) |
-| `/health` | — | Health check (no auth, used by Docker) |
+| Endpoint | Description |
+|---|---|
+| `POST /lb-buy` | BUY Sequence Complete — executes buy (50% of free balance) |
+| `POST /lb-sell` | SELL Sequence Complete — executes sell (50% of open position) |
+| `POST /confirm-buy` | BUY Early Warning — Telegram notification only, no trade |
+| `POST /confirm-sell` | SELL Early Warning — Telegram notification only, no trade |
+| `GET /status` | Current open trade info from Freqtrade |
+| `GET /health` | Health check |
 
 ---
 
-## TradingView alert message body
+## Setup
 
-Use this exact JSON for **all six alerts** (just change the endpoint URL per alert):
+### 1. Prerequisites
 
-```json
-{"pair": "SOL/USD", "token": "YOUR_SECRET_TOKEN"}
-```
-
-> Your `SECRET_TOKEN` is in your `.env` file. Never share it.
-
----
-
-## Setting up TradingView alerts
-
-Create one alert per endpoint. The alert conditions are entirely up to you — use whichever indicators you trade with. The signal tracker only cares that the webhook fires; it doesn't inspect the indicator.
-
-**For each alert:**
-- Set **Trigger** to `Once per bar close`
-- Set **Expiration** to `Open-ended`
-- Enable **Webhook URL** and paste the endpoint
-- Paste the JSON message body above (with your pair and token)
-
-**Example mapping (use your own indicators):**
-
-| What fires it | Endpoint |
-|---------------|----------|
-| Your mean reversion indicator → long condition | `https://signals.yourdomain.com/mr-buy` |
-| Your confluence/confirmation indicator → long condition | `https://signals.yourdomain.com/confirm-buy` |
-| Your trend/breakout indicator → crossing up | `https://signals.yourdomain.com/lb-buy` |
-| Your mean reversion indicator → short condition | `https://signals.yourdomain.com/mr-sell` |
-| Your confluence/confirmation indicator → short condition | `https://signals.yourdomain.com/confirm-sell` |
-| Your trend/breakout indicator → crossing down | `https://signals.yourdomain.com/lb-sell` |
-
-> The order matters. Step 1 must fire before Step 2, and Step 2 before Step 3.
-> If Step 2 arrives before Step 1, nothing happens and the sequence stays at 0.
-
----
-
-## Signal window
-
-The window controls how long the sequence stays alive after Step 1.
-
-| Chart timeframe | 10 candles | `WINDOW_SECONDS` |
-|-----------------|------------|------------------|
-| 4h | 40 hours | `144000` |
-| 1h | 10 hours | `36000` |
-| 15m | 2.5 hours | `9000` |
-
-Set this in your `.env` file or when running `setup.sh`.
-
----
-
-## Installation
-
-### Prerequisites
-
-- Docker and Docker Compose
-- A domain name (free with Cloudflare)
-- A Cloudflare account (free tier is fine)
-- Exchange API keys (read + trade, never withdrawal)
+- Docker and Docker Compose installed
+- A supported exchange account — CEX (Kraken, Binance, etc.) or DEX (Hyperliquid)
 - TradingView account with webhook alerts
+- Telegram bot (optional, for notifications)
 
----
-
-### Choose your setup path
-
-#### Path 1A — VPS (cloud server)
-Best if you have a VPS. Caddy handles HTTPS automatically. Requires ports 80 and 443 open.
-
-#### Path 1B — Self-hosted (Unraid / NAS / home server / Raspberry Pi)
-No VPS needed. Uses Cloudflare Tunnel — a free outbound-only connection from your home network to Cloudflare's edge. No open ports, no port forwarding, works behind CGNAT.
-
----
-
-### Part 1 — Get a domain and set up Cloudflare
-
-1. Register a domain (or use one you already own)
-2. Add it to Cloudflare (free account at cloudflare.com)
-3. Point your domain's nameservers to Cloudflare's
-
-You'll create two subdomains — one for the signal tracker, one for the Freqtrade UI.
-Example: `signals.yourdomain.com` and `trade.yourdomain.com`
-
----
-
-### Part 2A — VPS setup (skip if self-hosted)
-
-1. Spin up a VPS (Ubuntu 22.04+, 1 CPU / 1 GB RAM minimum)
-2. Install Docker:
-   ```bash
-   curl -fsSL https://get.docker.com | sh
-   ```
-3. Open ports 80 and 443 in your firewall
-4. In Cloudflare DNS, create two **A records** pointing to your VPS public IP:
-   - `signals.yourdomain.com` → your VPS IP
-   - `trade.yourdomain.com` → your VPS IP
-5. Skip to **Part 3 — Install**
-
----
-
-### Part 2B — Self-hosted / Cloudflare Tunnel setup (skip if VPS)
-
-**Option A — You already have a Cloudflare Tunnel container running** (e.g. on Unraid via the Community App)
-
-1. Note the Docker network your tunnel container runs on (on Unraid: open the container template → Network Type field)
-2. In Cloudflare Zero Trust → Networks → Tunnels → your tunnel → Public Hostnames, add:
-   - `signals.yourdomain.com` → `http://signal-tracker:5000`
-   - `trade.yourdomain.com` → `http://freqtrade:8080`
-3. You'll enter this network name when running `setup.sh`
-
-**Option B — No cloudflared running yet**
-
-1. Go to [Cloudflare Zero Trust](https://one.dash.cloudflare.com) → Networks → Tunnels → Create a tunnel
-2. Give it a name, copy the tunnel token
-3. Under Public Hostnames, add:
-   - `signals.yourdomain.com` → `http://signal-tracker:5000`
-   - `trade.yourdomain.com` → `http://freqtrade:8080`
-4. Paste the token when `setup.sh` asks for it
-5. In `docker-compose.selfhosted.yml`, uncomment the `cloudflared` service and remove the `networks` sections
-
----
-
-### Part 3 — Get exchange API keys
-
-**Kraken:**
-1. Log in → Security → API → Create API key
-2. Permissions: Query Funds, Query Orders, Create & Modify Orders, Cancel/Close Orders
-3. **Never enable Withdraw**
-
-**Binance:**
-1. Log in → Profile → API Management → Create API
-2. Enable: Enable Reading, Enable Spot & Margin Trading
-3. **Never enable withdrawals**
-
----
-
-### Part 4 — Create a Telegram bot (optional)
-
-1. Open Telegram → search `@BotFather` → `/newbot`
-2. Follow prompts, copy the bot token
-3. Start a chat with your bot, then visit:
-   `https://api.telegram.org/botYOUR_TOKEN/getUpdates`
-4. Copy your `chat_id` from the response
-
----
-
-### Part 5 — Install
+### 2. Configure
 
 ```bash
-# Clone the repo
-git clone https://github.com/ballzac81/IADSS-Signal-Tracker.git
-cd IADSS-Signal-Tracker
-
-# Run setup (generates secrets, collects config, writes .env)
-chmod +x setup.sh
-./setup.sh
+mkdir -p user_data/strategies
+cp strategies/WebhookStrategy.py user_data/strategies/
 ```
 
-`setup.sh` will ask you:
-- VPS or self-hosted?
-- Your two domain names
-- Cloudflare tunnel token (self-hosted only)
-- Docker network name (self-hosted Option A only)
-- Exchange name, API key, API secret
-- Trading pair (default: SOL/USD)
-- Signal window in seconds (default: 144000)
-- Telegram token and chat ID (optional)
+**For CEX (Kraken, Binance, etc.):**
+```bash
+cp config.json user_data/
+```
 
-It will generate three random secrets automatically and write your `.env` file.
+**For Hyperliquid (DEX):**
+```bash
+cp config.hyperliquid.json user_data/config.json
+```
 
----
+Edit `user_data/config.json` and replace all `CHANGE_THIS` values:
+- Exchange credentials (API key/secret for CEX, or wallet address + private key for Hyperliquid)
+- Telegram bot token and chat ID
+- Freqtrade API password
+- JWT secret key (random 32+ char string)
+- Your trading pair whitelist
 
-### Part 6 — Start
+Edit `docker-compose.yml` and replace all `CHANGE_THIS` values:
+- `SECRET_TOKEN` — random string for webhook authentication
+- `TELEGRAM_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `FREQTRADE_PASS` — must match `config.json` API password
 
-**VPS:**
+### 3. Generate secure values
+
+```bash
+# Webhook secret token
+openssl rand -hex 24
+
+# Freqtrade JWT secret
+openssl rand -hex 32
+```
+
+### 4. Start
+
 ```bash
 docker compose up -d
 ```
 
-**Self-hosted:**
+### 5. Set up TradingView alerts
+
+#### Add the indicator
+
+1. Open TradingView → your chart (e.g. SOLUSDT, 4H)
+2. Click **Indicators** → search **"IADSS Confluence Monitor"** → add it
+   - Direct link: https://www.tradingview.com/script/GzeIM5db-IADSS-Confluence-Monitor/
+
+#### Create alerts (2 required, 2 optional)
+
+**Required — trade execution:**
+
+| Alert name | Condition | Webhook URL |
+|---|---|---|
+| IADSS BUY | `BUY Sequence Complete` | `https://your-domain/lb-buy?token=YOUR_TOKEN` |
+| IADSS SELL | `SELL Sequence Complete` | `https://your-domain/lb-sell?token=YOUR_TOKEN` |
+
+**Optional — early warning Telegram notifications:**
+
+| Alert name | Condition | Webhook URL |
+|---|---|---|
+| IADSS BUY Early Warning | `BUY Early Warning` | `https://your-domain/confirm-buy?token=YOUR_TOKEN` |
+| IADSS SELL Early Warning | `SELL Early Warning` | `https://your-domain/confirm-sell?token=YOUR_TOKEN` |
+
+**Alert settings:**
+- Expiration: Open-ended
+- Alert actions: Webhook URL only
+- Message body (CEX — Kraken etc.):
+  ```json
+  {"pair": "SOL/USD"}
+  ```
+- Message body (Hyperliquid — futures pair format):
+  ```json
+  {"pair": "SOL/USDC:USDC"}
+  ```
+
+### 6. Access Freqtrade UI
+
+Open `http://localhost:8067` in your browser.
+
+### 7. Go live
+
+When happy with dry run performance:
+1. Set `"dry_run": false` in `config.json`
+2. Restart: `docker compose restart freqtrade`
+
+---
+
+## Self-hosted setup (Unraid / home server)
+
+Use `docker-compose.selfhosted.yml` instead of the default compose file.
+This version uses a Cloudflare Tunnel for external access instead of a reverse proxy,
+so no ports are exposed to the internet directly.
+
 ```bash
 docker compose -f docker-compose.selfhosted.yml up -d
 ```
 
-**Unraid auto-start on boot** — add to `/boot/config/go`:
+Freqtrade UI is accessible on port `8067` on your local network.
+The signal-tracker webhook server is reachable via your Cloudflare Tunnel URL.
+
+---
+
+## Position sizing
+
+- Each buy stakes **50% of your available balance** at the time of the signal
+- Each sell exits **50% of the current open position**
+- Supports multiple buys on the same pair (DCA / pyramiding)
+- Minimum stake enforced by `MIN_STAKE` env var (default `$10`)
+
+## Adding more pairs
+
+**CEX (Kraken, Binance, etc.):**
+```json
+"pair_whitelist": ["SOL/USD", "BTC/USD", "ETH/USD"]
+```
+
+**Hyperliquid (futures format):**
+```json
+"pair_whitelist": ["SOL/USDC:USDC", "BTC/USDC:USDC", "ETH/USDC:USDC"]
+```
+
+Create separate TradingView alerts for each pair with the pair name in the message body.
+
+---
+
+## Hyperliquid (DEX) setup
+
+Freqtrade has native support for Hyperliquid via CCXT — no changes to the signal tracker are needed.
+Hyperliquid is a decentralized perpetuals exchange that uses wallet keys instead of API keys.
+
+### Key differences from CEX
+
+| | CEX (Kraken etc.) | Hyperliquid |
+|---|---|---|
+| Auth | API key + secret | Wallet address + API private key |
+| Market type | Spot | Futures / perps |
+| Stake currency | USD | USDC |
+| Pair format | `SOL/USD` | `SOL/USDC:USDC` |
+| Stoploss on exchange | ✅ market or limit | ✅ limit only |
+| Market orders | ✅ native | ⚠️ simulated (5% max slippage) |
+
+### Hyperliquid config
+
+Use `config.hyperliquid.json` as your starting point:
 ```bash
-cd /mnt/user/appdata/IADSS-Signal-Tracker && docker compose -f docker-compose.selfhosted.yml up -d
+cp config.hyperliquid.json user_data/config.json
 ```
 
----
-
-### Part 7 — Verify
-
-```bash
-curl https://signals.yourdomain.com/health
-# → {"status":"ok","persistence":"redis"}
+The exchange block looks like this:
+```json
+"exchange": {
+    "name": "hyperliquid",
+    "walletAddress": "0x_YOUR_MAIN_WALLET_ADDRESS",
+    "privateKey": "0x_YOUR_API_WALLET_PRIVATE_KEY"
+}
 ```
 
-Check signal state (replace with your token):
-```
-https://signals.yourdomain.com/status?token=YOUR_SECRET_TOKEN
-```
+- **walletAddress** — your main wallet address (e.g. MetaMask). NOT the API wallet address.
+- **privateKey** — generated at https://app.hyperliquid.xyz/API. This is a trading-only key with no withdrawal permissions.
 
----
+### Hyperliquid security
 
-### Part 8 — Freqtrade UI
+Hyperliquid's API wallet private key **cannot withdraw funds** — it can only place and cancel orders.
+This means even if the key is compromised, your funds cannot be drained.
+That said, still follow best practices:
 
-Open `https://trade.yourdomain.com` in your browser.
+- Generate a dedicated API wallet at https://app.hyperliquid.xyz/API — never use your main wallet private key
+- Only deposit the amount you intend to trade
+- Use a subaccount if you have sufficient trading volume to qualify
+- Keep your main wallet mnemonic phrase offline and never on the server
 
-- Username: `admin`
-- Password: the `FREQTRADE_PASS` value shown at the end of `setup.sh`
+### Hyperliquid deposits
 
----
-
-### Part 9 — Set up TradingView alerts
-
-See the [TradingView alerts section](#setting-up-tradingview-alerts) above.
-
-After your first alert fires, check the status endpoint — you should see Step 1 registered.
-
----
-
-## Going live
-
-By default everything runs in **dry run mode** — no real money moves.
-
-When you're satisfied with dry run performance:
-
-1. Edit `user_data/config.json` → set `"dry_run": false`
-2. Restart:
-   ```bash
-   # VPS
-   docker compose restart freqtrade
-
-   # Self-hosted
-   docker compose -f docker-compose.selfhosted.yml restart freqtrade
-   ```
-
----
-
-## Monitoring
-
-```bash
-# All logs
-docker compose logs -f
-
-# Signal tracker only
-docker compose logs -f signal-tracker
-
-# Freqtrade only
-docker compose logs -f freqtrade
-```
-
----
-
-## Adding more trading pairs
-
-1. Add the pair to `user_data/config.json`:
-   ```json
-   "pair_whitelist": ["SOL/USD", "BTC/USD", "ETH/USD"]
-   ```
-
-2. Restart Freqtrade
-
-3. Create new TradingView alerts for the new pair — same 6 endpoints, just change the pair in the message body:
-   ```json
-   {"pair": "BTC/USD", "token": "YOUR_SECRET_TOKEN"}
-   ```
+Hyperliquid settles on Arbitrum One (Ethereum L2) and uses USDC as collateral.
+See the [official onboarding guide](https://hyperliquid.gitbook.io/hyperliquid-docs/onboarding/how-to-start-trading) for deposit steps.
 
 ---
 
 ## Security
 
-- Webhook endpoints require `SECRET_TOKEN` in every request body
-- `/status` requires `?token=SECRET_TOKEN` in the URL query string
-- `/health` is unauthenticated (used by Docker healthcheck only)
-- Rate limiting: 20 requests/minute on webhooks, 60/hour on status
-- No ports are exposed publicly — all traffic goes through Caddy (VPS) or Cloudflare Tunnel (self-hosted)
-- `.env` is gitignored and never committed
-- `user_data/` is gitignored — contains your live config and API keys
+- All webhook endpoints require `?token=YOUR_SECRET_TOKEN` in the URL
+- Freqtrade UI should be behind a reverse proxy or Cloudflare Tunnel — never exposed directly
 - **Never enable withdrawal permissions on your exchange API keys**
+- Never commit `.env` or `user_data/` — both are gitignored
+- Use `openssl rand -hex 24` to generate your secret token
 
 ---
 
-## Telegram commands
+## Telegram notifications
 
-Once your bot is connected, send these in your Telegram chat:
+Once your Telegram bot is configured you will receive:
+- BUY and SELL early warnings (if confirm alerts are set up)
+- Trade execution confirmations with stake, rate, and trade ID
+- Failure alerts with reason
 
-| Command | Action |
-|---------|--------|
-| `/status` | Open trades |
-| `/profit` | Profit summary |
-| `/balance` | Current balance |
-| `/stop` | Stop the bot |
-| `/start` | Start the bot |
-
----
-
-## Troubleshooting
-
-**Health check fails:**
-```bash
-docker compose ps          # check all containers are Up
-docker compose logs signal-tracker
-```
-
-**Signals not registering:**
-- Check the webhook URL in TradingView matches exactly (including `/mr-buy` not `/mrbuy`)
-- Check the JSON body has `"pair"` and `"token"` keys
-- Verify your token matches `SECRET_TOKEN` in `.env`
-
-**Freqtrade not connecting:**
-- Check `docker compose logs freqtrade`
-- Verify `user_data/config.json` was generated (run `ls user_data/`)
-
-**Cloudflare Tunnel shows as inactive:**
-- On Unraid: check your cloudflared Community App container is running
-- Verify the tunnel hostname matches the container name exactly (`signal-tracker`, `freqtrade`)
-
-**Redis not connecting:**
-```bash
-docker compose exec signal-tracker curl http://localhost:5000/health
-# "persistence":"file" means Redis is down — check IADSS_redis container
-```
+You can also send commands directly to your Freqtrade bot:
+- `/status` — open trades
+- `/profit` — profit summary
+- `/balance` — current balance
+- `/stop` — stop the bot
+- `/start` — start the bot
 
 ---
 
-## File structure
+## Acknowledgements
 
-```
-IADSS-Signal-Tracker/
-├── signal_tracker.py              # Flask webhook server
-├── Dockerfile                     # Container build
-├── requirements.txt               # Python dependencies
-├── docker-compose.yml             # VPS path (Caddy + all services)
-├── docker-compose.selfhosted.yml  # Self-hosted path (Cloudflare Tunnel)
-├── Caddyfile                      # Auto-HTTPS config (VPS only)
-├── config.json                    # Freqtrade config template (safe, no secrets)
-├── .env.example                   # Config template — copy to .env
-├── setup.sh                       # Interactive setup script
-└── strategies/
-    └── WebhookStrategy.py         # Freqtrade strategy file
-```
+A huge thank you to **[Gregusm](https://www.tradingview.com/u/gregusm/)** for creating the
+**IADSS Confluence Monitor**
+([view on TradingView](https://www.tradingview.com/script/GzeIM5db-IADSS-Confluence-Monitor/)).
 
-`user_data/` is created by `setup.sh` and is gitignored. It contains your live config, logs, and trade database.
+This project was originally built with a custom 3-step state machine to sequence Mean Reversion,
+Confluence, and Trend flip signals server-side. Following an external audit, we switched to
+Gregusm's indicator which handles the entire sequence on the chart — producing cleaner signals
+with no server-side state to manage or expire.
+
+If you find his work useful, please give it a like and follow him on TradingView.
 
 ---
 
-## Disclaimer
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+## ⚠️ Disclaimer
 
 This software is for educational and informational purposes only. It is not financial advice.
 
-Trading cryptocurrencies involves significant risk of loss. Past performance is not indicative of future results. You may lose some or all of your capital.
+Trading cryptocurrencies and other financial instruments involves significant risk of loss.
+Past performance is not indicative of future results. You may lose some or all of your invested capital.
 
 By using this software you acknowledge that:
 - You are solely responsible for your trading decisions
-- The authors accept no liability for financial losses
-- Never trade with money you cannot afford to lose
-- Seek independent financial advice before trading
+- The authors accept no liability for any financial losses incurred
+- You should never trade with money you cannot afford to lose
+- This software comes with no guarantee of profit or performance
+- You should seek independent financial advice before trading
 
 **Use at your own risk.**
