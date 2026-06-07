@@ -44,6 +44,8 @@ services:
     volumes:
       - redis_data:/data
     command: redis-server --save 60 1 --loglevel warning
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -66,6 +68,8 @@ services:
       --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
       --config /freqtrade/user_data/config.json
       --strategy WebhookStrategy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     depends_on:
       redis:
         condition: service_healthy
@@ -89,6 +93,8 @@ services:
       - REDIS_URL=redis://IADSS_redis:6379/0
     volumes:
       - signal_data:/data
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     depends_on:
       redis:
         condition: service_healthy
@@ -129,4 +135,3 @@ networks:
 volumes:
   redis_data:    # Redis RDB snapshots — signal state survives restarts
   signal_data:   # Signal tracker file-based state fallback
-
