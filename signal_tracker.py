@@ -285,27 +285,27 @@ def mr_buy(data):
     return jsonify({"status": "ok" if ok else "reset", "reason": reason})
 
 
-@app.route("/signal-buy", methods=["POST"])
+@app.route("/confirm-buy", methods=["POST"])
 @limiter.limit(WEBHOOK_LIMIT)
 @require_token
-def signal_buy(data):
+def confirm_buy(data):
     pair = data.get("pair", "UNKNOWN")
     ok, reason = advance("buy", 2, pair)
     if ok:
         remaining = window_remaining("buy")
-        telegram(f"📍 BUY 2/3: Signal confirmed — {pair} (window: {remaining // 3600}h)")
+        telegram(f"📍 BUY 2/3: Confirmation — {pair} (window: {remaining // 3600}h)")
     return jsonify({"status": "ok" if ok else "reset", "reason": reason})
 
 
-@app.route("/trend-buy", methods=["POST"])
+@app.route("/lb-buy", methods=["POST"])
 @limiter.limit(WEBHOOK_LIMIT)
 @require_token
-def trend_buy(data):
+def lb_buy(data):
     pair = data.get("pair", "UNKNOWN")
     ok, reason = advance("buy", 3, pair)
     if not ok:
         return jsonify({"status": "reset", "reason": reason})
-    telegram(f"📍 BUY 3/3: Trend Change — firing trade for {pair}")
+    telegram(f"📍 BUY 3/3: Trend/breakout — firing trade for {pair}")
     success = execute_buy(pair)
     return jsonify({"status": "executed" if success else "error"})
 
@@ -325,27 +325,27 @@ def mr_sell(data):
     return jsonify({"status": "ok" if ok else "reset", "reason": reason})
 
 
-@app.route("/signal-sell", methods=["POST"])
+@app.route("/confirm-sell", methods=["POST"])
 @limiter.limit(WEBHOOK_LIMIT)
 @require_token
-def signal_sell(data):
+def confirm_sell(data):
     pair = data.get("pair", "UNKNOWN")
     ok, reason = advance("sell", 2, pair)
     if ok:
         remaining = window_remaining("sell")
-        telegram(f"📍 SELL 2/3: Signal confirmed — {pair} (window: {remaining // 3600}h)")
+        telegram(f"📍 SELL 2/3: Confirmation — {pair} (window: {remaining // 3600}h)")
     return jsonify({"status": "ok" if ok else "reset", "reason": reason})
 
 
-@app.route("/trend-sell", methods=["POST"])
+@app.route("/lb-sell", methods=["POST"])
 @limiter.limit(WEBHOOK_LIMIT)
 @require_token
-def trend_sell(data):
+def lb_sell(data):
     pair = data.get("pair", "UNKNOWN")
     ok, reason = advance("sell", 3, pair)
     if not ok:
         return jsonify({"status": "reset", "reason": reason})
-    telegram(f"📍 SELL 3/3: Trend Change — firing sell for {pair}")
+    telegram(f"📍 SELL 3/3: Trend/breakout — firing sell for {pair}")
     success = execute_sell(pair)
     return jsonify({"status": "executed" if success else "error"})
 
