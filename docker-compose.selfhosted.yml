@@ -1,0 +1,106 @@
+# IADSS — Self-hosted path (Unraid, NAS, Raspberry Pi, home server)
+# Uses Cloudflare Tunnel instead of Caddy — no open ports on your network,
+# works behind CGNAT, Cloudflare handles HTTPS automatically.
+#
+# Prerequisites:
+#   1. Copy .env.example to .env and fill in your values  (or run ./setup.sh)
+#   2. Create a Cloudflare Tunnel and add CLOUDFLARE_TUNNEL_TOKEN to .env
+#      See README Part 1B for full instructions.
+#   3. Run: docker compose -f docker-compose.selfhosted.yml up -d
+#
+# Unraid auto-start on boot — add to /boot/config/go:
+#   cd /root/IADSS-Signal-Tracker && docker compose -f docker-compose.selfhosted.yml up -d
+
+services:
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  # Persists signal sequence state so a container restart doesn't lose progress.
+  redis:
+    image: redis:7-alpine
+    container_name: IADSS_redis
+    restart: unless-stopped
+    # No public ports — internal network only
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Freqtrade ───────────────────────────────────────────────────────────────
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable
+    container_name: IADSS_freqtrade
+    restart: unless-stopped
+    # No public ports — Cloudflare Tunnel is the only ingress
+    expose:
+      - "8080"
+    volumes:
+      - ./user_data:/freqtrade/user_data
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --config /freqtrade/user_data/config.json
+      --strategy WebhookStrategy
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Signal Tracker ──────────────────────────────────────────────────────────
+  signal-tracker:
+    build: .
+    container_name: IADSS_signal_tracker
+    restart: unless-stopped
+    # No public ports — Cloudflare Tunnel is the only ingress
+    expose:
+      - "5000"
+    environment:
+      - SECRET_TOKEN=${SECRET_TOKEN}
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - FREQTRADE_URL=http://freqtrade:8080/api/v1
+      - FREQTRADE_USER=admin
+      - FREQTRADE_PASS=${FREQTRADE_PASS}
+      - WINDOW_SECONDS=${WINDOW_SECONDS:-144000}
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - signal_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      freqtrade:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Cloudflare Tunnel ────────────────────────────────────────────────────────
+  # Creates a secure outbound-only connection from your home network to
+  # Cloudflare's edge. No open ports, no port forwarding, works behind CGNAT.
+  # Cloudflare terminates HTTPS — your services are exposed via your subdomains.
+  #
+  # To get your token:
+  #   1. Go to Cloudflare Zero Trust → Networks → Tunnels → Create tunnel
+  #   2. Copy the token and add it to .env as CLOUDFLARE_TUNNEL_TOKEN
+  #   3. In the tunnel config, add two Public Hostnames:
+  #      signals.yourdomain.com  →  http://signal-tracker:5000
+  #      trade.yourdomain.com    →  http://freqtrade:8080
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: IADSS_cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      signal-tracker:
+        condition: service_healthy
+      freqtrade:
+        condition: service_started
+
+volumes:
+  redis_data:    # Redis RDB snapshots — signal state survives restarts
+  signal_data:   # Signal tracker file-based state fallback

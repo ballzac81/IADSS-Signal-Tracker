@@ -1,0 +1,50 @@
+# IADSS Caddyfile
+# Caddy automatically obtains and renews TLS certificates via Let's Encrypt.
+#
+# Requirements:
+#   - A domain name pointing to this server's public IP (A record)
+#   - Ports 80 and 443 open in your firewall / cloud security group
+#   - SIGNAL_DOMAIN and FREQTRADE_DOMAIN set in .env
+#
+# Example .env values:
+#   SIGNAL_DOMAIN=signals.yourdomain.com
+#   FREQTRADE_DOMAIN=trade.yourdomain.com
+#
+# TradingView webhook URL:  https://signals.yourdomain.com/mr-buy
+# Freqtrade UI:             https://trade.yourdomain.com
+
+# ── Signal Tracker ──────────────────────────────────────────────────────────
+{$SIGNAL_DOMAIN} {
+    reverse_proxy signal-tracker:5000
+
+    # Log to a file (rotated by Caddy automatically)
+    log {
+        output file /data/logs/caddy-signal.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+        format json
+    }
+
+    # Block anything that's not a known IADSS endpoint
+    @allowed_paths path /mr-buy /signal-buy /trend-buy /mr-sell /signal-sell /trend-sell /status /health
+    handle @allowed_paths {
+        reverse_proxy signal-tracker:5000
+    }
+    handle {
+        respond 404
+    }
+}
+
+# ── Freqtrade UI ─────────────────────────────────────────────────────────────
+{$FREQTRADE_DOMAIN} {
+    reverse_proxy freqtrade:8080
+
+    log {
+        output file /data/logs/caddy-freqtrade.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+        format json
+    }
+}
