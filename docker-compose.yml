@@ -32,8 +32,8 @@ services:
     container_name: freqtrade
     restart: unless-stopped
     # No public port — Caddy is the only ingress point
-    expose:
-      - "8080"
+    ports:
+      - "8067:8080"
     volumes:
       - ./user_data:/freqtrade/user_data
     command: >
@@ -52,8 +52,8 @@ services:
     container_name: signal-tracker
     restart: unless-stopped
     # No public port — Caddy is the only ingress point
-    expose:
-      - "5000"
+    ports:
+      - "5000:5000"
     environment:
       - SECRET_TOKEN=${SECRET_TOKEN}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
@@ -71,37 +71,38 @@ services:
       freqtrade:
         condition: service_started
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 30s
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 10
+      start_period: 30s
 
-  # ── Caddy (HTTPS reverse proxy) ──────────────────────────────────────────────
-  # Auto-obtains TLS certs from Let's Encrypt. Certs are stored in caddy_data
-  # and renewed automatically — no manual cert management needed.
-  caddy:
-    image: caddy:2-alpine
-    container_name: IADSS_caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"       # HTTP → redirected to HTTPS automatically
-      - "443:443"     # HTTPS
-      - "443:443/udp" # HTTP/3
-    environment:
-      - SIGNAL_DOMAIN=${SIGNAL_DOMAIN}
-      - FREQTRADE_DOMAIN=${FREQTRADE_DOMAIN}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      signal-tracker:
-        condition: service_healthy
-      freqtrade:
-        condition: service_started
+#  # ── Caddy (HTTPS reverse proxy) ──────────────────────────────────────────────
+# # Auto-obtains TLS certs from Let's Encrypt. Certs are stored in caddy_data
+#  # and renewed automatically — no manual cert management needed.
+#  caddy:
+#    image: caddy:2-alpine
+#    container_name: IADSS_caddy
+#    restart: unless-stopped
+#    ports:
+#      - "80:80"       # HTTP → redirected to HTTPS automatically
+#      - "443:443"     # HTTPS
+#      - "443:443/udp" # HTTP/3
+#    environment:
+#      - SIGNAL_DOMAIN=${SIGNAL_DOMAIN}
+#      - FREQTRADE_DOMAIN=${FREQTRADE_DOMAIN}
+#    volumes:
+#      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+#      - caddy_data:/data
+#      - caddy_config:/config
+#    depends_on:
+#      signal-tracker:
+#        condition: service_healthy
+#      freqtrade:
+#        condition: service_started
 
 volumes:
   redis_data:     # Redis RDB snapshots — signal state survives restarts
   signal_data:    # Signal tracker file-based state fallback
-  caddy_data:     # TLS certificates (auto-renewed)
-  caddy_config:   # Caddy internal config cache
+#  caddy_data:     # TLS certificates (auto-renewed)
+#  caddy_config:   # Caddy internal config cache
