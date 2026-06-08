@@ -85,8 +85,8 @@ def get_free_balance() -> float:
 
 def get_open_trade(pair: str):
     """Return the open trade for a pair (most recent), or None."""
-    data = _ft_request("GET", "/trades", params={"is_open": True})
-    trades = [t for t in data.get("trades", []) if t["pair"] == pair and t["is_open"]]
+    data = _ft_request("GET", "/status")
+    trades = [t for t in data if t["pair"] == pair and t["is_open"]]
     return sorted(trades, key=lambda t: t["open_date"])[-1] if trades else None
 
 # -- Trade execution ----------------------------------------------------------
