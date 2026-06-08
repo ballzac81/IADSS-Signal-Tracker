@@ -1,37 +1,11 @@
-# IADSS 
-# A TradingView webhook signal sequencer for Freqtrade
-# GitHub: https://github.com/ballzac81/IADSS-Signal-Tracker
-#
-# Prerequisites:
-#   1. Copy .env.example to .env and fill in your values  (or run ./setup.sh)
-#   2. Point SIGNAL_DOMAIN and FREQTRADE_DOMAIN DNS A records to this server
-#   3. Open ports 80 and 443 in your firewall
-#   4. Run: docker compose up -d
+# IADSS Signal Tracker
+# https://github.com/ballzac81/IADSS-Signal-Tracker
 
 services:
-
-  # ── Redis ───────────────────────────────────────────────────────────────────
-  # Persists signal sequence state so a container restart doesn't lose progress.
-  redis:
-    image: redis:7-alpine
-    container_name: IADSS_redis
-    restart: unless-stopped
-    # NOT exposed publicly — internal network only
-    volumes:
-      - redis_data:/data
-    command: redis-server --save 60 1 --loglevel warning
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  # ── Freqtrade ───────────────────────────────────────────────────────────────
   freqtrade:
     image: freqtradeorg/freqtrade:stable
-    container_name: freqtrade
+    container_name: IADSS_freqtrade
     restart: unless-stopped
-    # No public port — Caddy is the only ingress point
     ports:
       - "8067:8080"
     volumes:
@@ -42,67 +16,20 @@ services:
       --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
       --config /freqtrade/user_data/config.json
       --strategy WebhookStrategy
-    depends_on:
-      redis:
-        condition: service_healthy
 
-  # ── Signal Tracker ──────────────────────────────────────────────────────────
   signal-tracker:
-    build: .
-    container_name: signal-tracker
+    image: burgess22/signal-tracker
+    container_name: IADSS_signal_tracker
     restart: unless-stopped
-    # No public port — Caddy is the only ingress point
     ports:
-      - "5000:5000"
+      - "5001:5000"
     environment:
-      - SECRET_TOKEN=${SECRET_TOKEN}
-      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - FREQTRADE_URL=http://freqtrade:8080/api/v1
+      - SECRET_TOKEN=CHANGE_THIS_TO_RANDOM_STRING
+      - TELEGRAM_TOKEN=CHANGE_THIS_TO_YOUR_TELEGRAM_BOT_TOKEN
+      - TELEGRAM_CHAT_ID=CHANGE_THIS_TO_YOUR_TELEGRAM_CHAT_ID
+      - FREQTRADE_API=http://freqtrade:8080/api/v1
       - FREQTRADE_USER=admin
-      - FREQTRADE_PASS=${FREQTRADE_PASS}
-      - WINDOW_SECONDS=${WINDOW_SECONDS:-144000}
-      - REDIS_URL=redis://redis:6379/0
-    volumes:
-      - signal_data:/data
-    depends_on:
-      redis:
-        condition: service_healthy
-      freqtrade:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-
-#  # ── Caddy (HTTPS reverse proxy) ──────────────────────────────────────────────
-# # Auto-obtains TLS certs from Let's Encrypt. Certs are stored in caddy_data
-#  # and renewed automatically — no manual cert management needed.
-#  caddy:
-#    image: caddy:2-alpine
-#    container_name: IADSS_caddy
-#    restart: unless-stopped
-#    ports:
-#      - "80:80"       # HTTP → redirected to HTTPS automatically
-#      - "443:443"     # HTTPS
-#      - "443:443/udp" # HTTP/3
-#    environment:
-#      - SIGNAL_DOMAIN=${SIGNAL_DOMAIN}
-#      - FREQTRADE_DOMAIN=${FREQTRADE_DOMAIN}
-#    volumes:
-#      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-#      - caddy_data:/data
-#      - caddy_config:/config
-#    depends_on:
-#      signal-tracker:
-#        condition: service_healthy
-#      freqtrade:
-#        condition: service_started
-
-volumes:
-  redis_data:     # Redis RDB snapshots — signal state survives restarts
-  signal_data:    # Signal tracker file-based state fallback
-#  caddy_data:     # TLS certificates (auto-renewed)
-#  caddy_config:   # Caddy internal config cache
+      - FREQTRADE_PASS=CHANGE_THIS_TO_YOUR_FREQTRADE_PASSWORD
+      - STAKE_RATIO=0.5
+      - SELL_RATIO=0.5
+      - MIN_STAKE=10

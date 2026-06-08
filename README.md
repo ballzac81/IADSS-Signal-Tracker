@@ -237,3 +237,4 @@ By using this software you acknowledge that:
 - You should seek independent financial advice before trading
 
 **Use at your own risk.**
+
