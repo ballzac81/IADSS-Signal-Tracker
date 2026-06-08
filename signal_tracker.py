@@ -19,12 +19,19 @@ Endpoints:
 
 import logging
 import os
+import re
 import time
 import requests
 from functools import wraps
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+
+# -- Pair validation ----------------------------------------------------------
+PAIR_RE = re.compile(r'^[A-Z0-9]+/[A-Z0-9]+$')
+
+def valid_pair(pair: str) -> bool:
+    return bool(PAIR_RE.match(pair))
 
 # -- Config -------------------------------------------------------------------
 SECRET_TOKEN    = os.environ.get("SECRET_TOKEN", "")
@@ -191,6 +198,8 @@ def confirm_buy():
     """BUY Early Warning from Gregusm's indicator (MR + Confluence aligned)."""
     data = request.get_json(silent=True) or {}
     pair = data.get("pair", TRADING_PAIR)
+    if not valid_pair(pair):
+        return jsonify({"error": "invalid pair"}), 400
     logger.info("BUY early warning: %s", pair)
     telegram(
         f"IADSS BUY Early Warning\n"
@@ -206,6 +215,8 @@ def confirm_sell():
     """SELL Early Warning from Gregusm's indicator (MR + Confluence aligned)."""
     data = request.get_json(silent=True) or {}
     pair = data.get("pair", TRADING_PAIR)
+    if not valid_pair(pair):
+        return jsonify({"error": "invalid pair"}), 400
     logger.info("SELL early warning: %s", pair)
     telegram(
         f"IADSS SELL Early Warning\n"
@@ -221,6 +232,8 @@ def lb_buy():
     """BUY Sequence Complete — all three steps confirmed, execute buy."""
     data = request.get_json(silent=True) or {}
     pair = data.get("pair", TRADING_PAIR)
+    if not valid_pair(pair):
+        return jsonify({"error": "invalid pair"}), 400
     logger.info("BUY sequence complete: %s", pair)
     telegram(f"BUY Sequence Complete -- firing trade for {pair}")
     success = execute_buy(pair)
@@ -233,6 +246,8 @@ def lb_sell():
     """SELL Sequence Complete — all three steps confirmed, execute sell."""
     data = request.get_json(silent=True) or {}
     pair = data.get("pair", TRADING_PAIR)
+    if not valid_pair(pair):
+        return jsonify({"error": "invalid pair"}), 400
     logger.info("SELL sequence complete: %s", pair)
     telegram(f"SELL Sequence Complete -- firing trade for {pair}")
     success = execute_sell(pair)
