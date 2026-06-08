@@ -23,6 +23,8 @@ import time
 import requests
 from functools import wraps
 from flask import Flask, request, jsonify
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 # -- Config -------------------------------------------------------------------
 SECRET_TOKEN    = os.environ.get("SECRET_TOKEN", "")
@@ -46,6 +48,12 @@ logger = logging.getLogger(__name__)
 
 # -- Flask --------------------------------------------------------------------
 app = Flask(__name__)
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
 
 # -- Telegram -----------------------------------------------------------------
 def telegram(msg: str):
@@ -177,6 +185,7 @@ def require_token(f):
 # -- Endpoints ----------------------------------------------------------------
 
 @app.route("/confirm-buy", methods=["POST"])
+@limiter.limit("30 per minute")
 @require_token
 def confirm_buy():
     """BUY Early Warning from Gregusm's indicator (MR + Confluence aligned)."""
@@ -191,6 +200,7 @@ def confirm_buy():
     return jsonify({"status": "ok", "message": "early_warning"}), 200
 
 @app.route("/confirm-sell", methods=["POST"])
+@limiter.limit("30 per minute")
 @require_token
 def confirm_sell():
     """SELL Early Warning from Gregusm's indicator (MR + Confluence aligned)."""
@@ -205,6 +215,7 @@ def confirm_sell():
     return jsonify({"status": "ok", "message": "early_warning"}), 200
 
 @app.route("/lb-buy", methods=["POST"])
+@limiter.limit("10 per minute")
 @require_token
 def lb_buy():
     """BUY Sequence Complete — all three steps confirmed, execute buy."""
@@ -216,6 +227,7 @@ def lb_buy():
     return jsonify({"status": "trade_executed" if success else "trade_failed"}), 200
 
 @app.route("/lb-sell", methods=["POST"])
+@limiter.limit("10 per minute")
 @require_token
 def lb_sell():
     """SELL Sequence Complete — all three steps confirmed, execute sell."""
@@ -228,6 +240,7 @@ def lb_sell():
 
 # -- Status -------------------------------------------------------------------
 @app.route("/status", methods=["GET"])
+@limiter.limit("60 per minute")
 @require_token
 def status():
     pair = request.args.get("pair", TRADING_PAIR)
