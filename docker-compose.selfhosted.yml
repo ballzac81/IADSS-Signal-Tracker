@@ -21,7 +21,9 @@
 #   1. Go to Cloudflare Zero Trust → Networks → Tunnels → Create tunnel
 #   2. Copy the token and add it to .env as CLOUDFLARE_TUNNEL_TOKEN
 #   3. Uncomment the cloudflared service at the bottom of this file
-#   4. In Cloudflare public hostnames point to:
+#   4. Remove the networks: key from each service block and delete the
+#      top-level networks: block entirely
+#   5. In Cloudflare public hostnames point to:
 #        signals.yourdomain.com  →  http://signal-tracker:5000
 #        trade.yourdomain.com    →  http://freqtrade:8080
 
