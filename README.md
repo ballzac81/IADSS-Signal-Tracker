@@ -1,4 +1,4 @@
-# IADSS Signal Tracker — if you know you know
+# IADSS Signal Tracker
 
 A TradingView webhook receiver that executes trades on Freqtrade when the
 [IADSS Confluence Monitor](https://www.tradingview.com/script/GzeIM5db-IADSS-Confluence-Monitor/)
@@ -7,6 +7,9 @@ by [Gregusm](https://www.tradingview.com/u/gregusm/) fires a complete buy or sel
 The indicator handles all signal sequencing (Mean Reversion → Confluence → Trend flip)
 directly on the chart. This server receives the final alerts and executes trades via
 the Freqtrade API — no server-side state machine required.
+
+> **Spot markets only.** The IADSS indicators are calibrated for spot price action.
+> Using them with futures or perpetuals is not supported.
 
 ---
 
@@ -17,9 +20,9 @@ the Freqtrade API — no server-side state machine required.
 3. TradingView sends a webhook to this server
 4. The server calls the Freqtrade API to execute the trade
 
-**BUY flow:** Indicator fires `BUY Sequence Complete` → `/lb-buy` → buys 50% of free balance
+**BUY flow:** Indicator fires `BUY Sequence Complete` → `/lb-buy` → buys a configurable % of free balance (default: 50%)
 
-**SELL flow:** Indicator fires `SELL Sequence Complete` → `/lb-sell` → sells 50% of open position
+**SELL flow:** Indicator fires `SELL Sequence Complete` → `/lb-sell` → sells a configurable % of open position (default: 50%)
 
 ---
 
@@ -27,8 +30,8 @@ the Freqtrade API — no server-side state machine required.
 
 | Endpoint | Description |
 |---|---|
-| `POST /lb-buy` | BUY Sequence Complete — executes buy (50% of free balance) |
-| `POST /lb-sell` | SELL Sequence Complete — executes sell (50% of open position) |
+| `POST /lb-buy` | BUY Sequence Complete — executes buy (configurable stake, default 50% of free balance) |
+| `POST /lb-sell` | SELL Sequence Complete — executes sell (configurable size, default 50% of open position) |
 | `POST /confirm-buy` | BUY Early Warning — Telegram notification only, no trade |
 | `POST /confirm-sell` | SELL Early Warning — Telegram notification only, no trade |
 | `GET /status` | Current open trade info from Freqtrade |
@@ -41,7 +44,7 @@ the Freqtrade API — no server-side state machine required.
 ### 1. Prerequisites
 
 - Docker and Docker Compose installed
-- A supported exchange account — CEX (Kraken, Binance, etc.) or DEX (Hyperliquid)
+- A supported spot exchange account (Kraken, Binance, Coinbase, etc.)
 - TradingView account with webhook alerts
 - Telegram bot (optional, for notifications)
 
@@ -50,26 +53,19 @@ the Freqtrade API — no server-side state machine required.
 ```bash
 mkdir -p user_data/strategies
 cp strategies/WebhookStrategy.py user_data/strategies/
-```
-
-**For CEX (Kraken, Binance, etc.):**
-```bash
 cp config.json user_data/
 ```
 
-**For Hyperliquid (DEX):**
-```bash
-cp config.hyperliquid.json user_data/config.json
-```
-
 Edit `user_data/config.json` and replace all `CHANGE_THIS` values:
-- Exchange credentials (API key/secret for CEX, or wallet address + private key for Hyperliquid)
+
+- Exchange credentials (API key + secret)
 - Telegram bot token and chat ID
 - Freqtrade API password
 - JWT secret key (random 32+ char string)
 - Your trading pair whitelist
 
 Edit `docker-compose.yml` and replace all `CHANGE_THIS` values:
+
 - `SECRET_TOKEN` — random string for webhook authentication
 - `TELEGRAM_TOKEN`
 - `TELEGRAM_CHAT_ID`
@@ -116,15 +112,12 @@ docker compose up -d
 | IADSS SELL Early Warning | `SELL Early Warning` | `https://your-domain/confirm-sell?token=YOUR_TOKEN` |
 
 **Alert settings:**
+
 - Expiration: Open-ended
 - Alert actions: Webhook URL only
-- Message body (CEX — Kraken etc.):
+- Message body:
   ```json
   {"pair": "SOL/USD"}
-  ```
-- Message body (Hyperliquid — futures pair format):
-  ```json
-  {"pair": "SOL/USDC:USDC"}
   ```
 
 ### 6. Access Freqtrade UI
@@ -134,6 +127,7 @@ Open `http://localhost:8067` in your browser.
 ### 7. Go live
 
 When happy with dry run performance:
+
 1. Set `"dry_run": false` in `config.json`
 2. Restart: `docker compose restart freqtrade`
 
@@ -156,77 +150,26 @@ The signal-tracker webhook server is reachable via your Cloudflare Tunnel URL.
 
 ## Position sizing
 
-- Each buy stakes **50% of your available balance** at the time of the signal
-- Each sell exits **50% of the current open position**
+- Each buy stakes **a configurable % of your available balance** at the time of the signal (set via `STAKE_RATIO`, default `0.5` = 50%)
+- Each sell exits **a configurable % of the current open position** (set via `SELL_RATIO`, default `0.5` = 50%)
 - Supports multiple buys on the same pair (DCA / pyramiding)
 - Minimum stake enforced by `MIN_STAKE` env var (default `$10`)
 
+To adjust, set these in your `docker-compose.yml` environment block:
+
+```yaml
+STAKE_RATIO: "0.25"   # buy 25% of free balance per signal
+SELL_RATIO: "1.0"     # sell 100% of position on exit
+MIN_STAKE: "20"       # minimum USD stake
+```
+
 ## Adding more pairs
 
-**CEX (Kraken, Binance, etc.):**
 ```json
 "pair_whitelist": ["SOL/USD", "BTC/USD", "ETH/USD"]
 ```
 
-**Hyperliquid (futures format):**
-```json
-"pair_whitelist": ["SOL/USDC:USDC", "BTC/USDC:USDC", "ETH/USDC:USDC"]
-```
-
 Create separate TradingView alerts for each pair with the pair name in the message body.
-
----
-
-## Hyperliquid (DEX) setup
-
-Freqtrade has native support for Hyperliquid via CCXT — no changes to the signal tracker are needed.
-Hyperliquid is a decentralized perpetuals exchange that uses wallet keys instead of API keys.
-
-### Key differences from CEX
-
-| | CEX (Kraken etc.) | Hyperliquid |
-|---|---|---|
-| Auth | API key + secret | Wallet address + API private key |
-| Market type | Spot | Futures / perps |
-| Stake currency | USD | USDC |
-| Pair format | `SOL/USD` | `SOL/USDC:USDC` |
-| Stoploss on exchange | ✅ market or limit | ✅ limit only |
-| Market orders | ✅ native | ⚠️ simulated (5% max slippage) |
-
-### Hyperliquid config
-
-Use `config.hyperliquid.json` as your starting point:
-```bash
-cp config.hyperliquid.json user_data/config.json
-```
-
-The exchange block looks like this:
-```json
-"exchange": {
-    "name": "hyperliquid",
-    "walletAddress": "0x_YOUR_MAIN_WALLET_ADDRESS",
-    "privateKey": "0x_YOUR_API_WALLET_PRIVATE_KEY"
-}
-```
-
-- **walletAddress** — your main wallet address (e.g. MetaMask). NOT the API wallet address.
-- **privateKey** — generated at https://app.hyperliquid.xyz/API. This is a trading-only key with no withdrawal permissions.
-
-### Hyperliquid security
-
-Hyperliquid's API wallet private key **cannot withdraw funds** — it can only place and cancel orders.
-This means even if the key is compromised, your funds cannot be drained.
-That said, still follow best practices:
-
-- Generate a dedicated API wallet at https://app.hyperliquid.xyz/API — never use your main wallet private key
-- Only deposit the amount you intend to trade
-- Use a subaccount if you have sufficient trading volume to qualify
-- Keep your main wallet mnemonic phrase offline and never on the server
-
-### Hyperliquid deposits
-
-Hyperliquid settles on Arbitrum One (Ethereum L2) and uses USDC as collateral.
-See the [official onboarding guide](https://hyperliquid.gitbook.io/hyperliquid-docs/onboarding/how-to-start-trading) for deposit steps.
 
 ---
 
@@ -243,11 +186,13 @@ See the [official onboarding guide](https://hyperliquid.gitbook.io/hyperliquid-d
 ## Telegram notifications
 
 Once your Telegram bot is configured you will receive:
+
 - BUY and SELL early warnings (if confirm alerts are set up)
 - Trade execution confirmations with stake, rate, and trade ID
 - Failure alerts with reason
 
 You can also send commands directly to your Freqtrade bot:
+
 - `/status` — open trades
 - `/profit` — profit summary
 - `/balance` — current balance
@@ -280,11 +225,11 @@ MIT License — see [LICENSE](LICENSE) for details.
 ## ⚠️ Disclaimer
 
 This software is for educational and informational purposes only. It is not financial advice.
-
 Trading cryptocurrencies and other financial instruments involves significant risk of loss.
 Past performance is not indicative of future results. You may lose some or all of your invested capital.
 
 By using this software you acknowledge that:
+
 - You are solely responsible for your trading decisions
 - The authors accept no liability for any financial losses incurred
 - You should never trade with money you cannot afford to lose
