@@ -1,10 +1,19 @@
-# IADSS Signal Tracker
+# IADSS Signal Tracker — Standard / VPS deployment
+# Webhook receiver for the IADSS Confluence Monitor by Gregusm
 # https://github.com/ballzac81/IADSS-Signal-Tracker
+#
+# For self-hosted (Unraid, NAS, home server) see docker-compose.selfhosted.yml
+#
+# Setup:
+#   1. Copy .env.example to .env and fill in your values
+#   2. Copy config.json to user_data/ and edit exchange credentials
+#   3. docker compose up -d
 
 services:
+
   freqtrade:
     image: freqtradeorg/freqtrade:stable
-    container_name: IADSS_freqtrade
+    container_name: freqtrade
     restart: unless-stopped
     ports:
       - "8067:8080"
@@ -18,18 +27,27 @@ services:
       --strategy WebhookStrategy
 
   signal-tracker:
-    image: burgess22/signal-tracker
-    container_name: IADSS_signal_tracker
+    build: .
+    container_name: signal-tracker
     restart: unless-stopped
     ports:
       - "5001:5000"
     environment:
-      - SECRET_TOKEN=CHANGE_THIS_TO_RANDOM_STRING
-      - TELEGRAM_TOKEN=CHANGE_THIS_TO_YOUR_TELEGRAM_BOT_TOKEN
-      - TELEGRAM_CHAT_ID=CHANGE_THIS_TO_YOUR_TELEGRAM_CHAT_ID
+      - SECRET_TOKEN=${SECRET_TOKEN}
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - FREQTRADE_API=http://freqtrade:8080/api/v1
       - FREQTRADE_USER=admin
-      - FREQTRADE_PASS=CHANGE_THIS_TO_YOUR_FREQTRADE_PASSWORD
-      - STAKE_RATIO=0.5
-      - SELL_RATIO=0.5
-      - MIN_STAKE=10
+      - FREQTRADE_PASS=${FREQTRADE_PASS}
+      - TRADING_PAIR=${TRADING_PAIR:-SOL/USD}
+      - STAKE_RATIO=${STAKE_RATIO:-0.5}
+      - SELL_RATIO=${SELL_RATIO:-0.5}
+      - MIN_STAKE=${MIN_STAKE:-10}
+    depends_on:
+      freqtrade:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

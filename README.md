@@ -1,240 +1,152 @@
 # IADSS Signal Tracker
 
-A TradingView webhook receiver that executes trades on Freqtrade when the
-[IADSS Confluence Monitor](https://www.tradingview.com/script/GzeIM5db-IADSS-Confluence-Monitor/)
-by [Gregusm](https://www.tradingview.com/u/gregusm/) fires a complete buy or sell sequence.
+A webhook receiver for the [IADSS Confluence Monitor](https://www.tradingview.com/script/GzeIM5db-IADSS-Confluence-Monitor/) by Gregusm. Receives TradingView alerts and executes spot trades via the Freqtrade API.
 
-The indicator handles all signal sequencing (Mean Reversion → Confluence → Trend flip)
-directly on the chart. This server receives the final alerts and executes trades via
-the Freqtrade API — no server-side state machine required.
-
-> **Spot markets only.** The IADSS indicators are calibrated for spot price action.
-> Using them with futures or perpetuals is not supported.
-
----
+> **Spot only.** The IADSS Confluence Monitor indicators work with spot markets. Futures/perps are not supported.
 
 ## How it works
 
-1. Add Gregusm's **IADSS Confluence Monitor** to your TradingView chart
-2. The indicator monitors three layers internally and fires alerts when a full sequence completes
-3. TradingView sends a webhook to this server
-4. The server calls the Freqtrade API to execute the trade
+The IADSS Confluence Monitor on TradingView handles all signal sequencing internally (MR alignment → Confluence → Trend flip). When the full sequence completes, it fires a webhook. This server receives that webhook and executes the trade.
 
-**BUY flow:** Indicator fires `BUY Sequence Complete` → `/lb-buy` → buys a configurable % of free balance (default: 50%)
+Two alert types per side:
 
-**SELL flow:** Indicator fires `SELL Sequence Complete` → `/lb-sell` → sells a configurable % of open position (default: 50%)
+| Alert | Endpoint | Action |
+|-------|----------|--------|
+| BUY Early Warning (MR + Confluence aligned) | `/confirm-buy` | Telegram notification only |
+| BUY Sequence Complete (all conditions met) | `/lb-buy` | Executes buy via Freqtrade |
+| SELL Early Warning | `/confirm-sell` | Telegram notification only |
+| SELL Sequence Complete | `/lb-sell` | Executes sell via Freqtrade |
 
----
+Additional endpoints:
 
-## Webhook endpoints
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/status` | GET | Current open trade info |
+| `/health` | GET | Health check (no auth) |
 
-| Endpoint | Description |
-|---|---|
-| `POST /lb-buy` | BUY Sequence Complete — executes buy (configurable stake, default 50% of free balance) |
-| `POST /lb-sell` | SELL Sequence Complete — executes sell (configurable size, default 50% of open position) |
-| `POST /confirm-buy` | BUY Early Warning — Telegram notification only, no trade |
-| `POST /confirm-sell` | SELL Early Warning — Telegram notification only, no trade |
-| `GET /status` | Current open trade info from Freqtrade |
-| `GET /health` | Health check |
+## TradingView alert setup
 
----
+Create 4 alerts on the IADSS Confluence Monitor. Set each to fire "Once per bar close" and add your webhook URL.
+
+**Webhook URL format:**
+**Webhook message body (JSON):**
+```json
+{"pair": "SOL/USD"}
+```
+
+For multi-pair setups, set the pair in the message body. The `token` can go in the URL or as an `X-Token` header.
+
+## Position sizing
+
+Position sizes are fully configurable via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STAKE_RATIO` | `0.5` | Fraction of free balance used per buy (0.5 = 50%) |
+| `SELL_RATIO` | `0.5` | Fraction of open position sold per sell signal (0.5 = 50%) |
+| `MIN_STAKE` | `10` | Minimum USD stake — skips buy if below this |
+| `TRADING_PAIR` | `SOL/USD` | Default pair if not specified in webhook body |
 
 ## Setup
 
-### 1. Prerequisites
+### Prerequisites
+- Docker and Docker Compose
+- A spot exchange account supported by Freqtrade (Kraken, Coinbase, Binance etc.)
+- TradingView account with the IADSS Confluence Monitor indicator
+- Telegram bot (optional, for trade notifications)
 
-- Docker and Docker Compose installed
-- A supported spot exchange account (Kraken, Binance, Coinbase, etc.)
-- TradingView account with webhook alerts
-- Telegram bot (optional, for notifications)
+### 1. Clone and configure
 
-### 2. Configure
+```bash
+git clone https://github.com/ballzac81/IADSS-Signal-Tracker.git
+cd IADSS-Signal-Tracker
+cp .env.example .env
+```
+
+Edit `.env` with your values.
+
+### 2. Set up Freqtrade config
 
 ```bash
 mkdir -p user_data/strategies
-cp strategies/WebhookStrategy.py user_data/strategies/
 cp config.json user_data/
+cp strategies/WebhookStrategy.py user_data/strategies/
 ```
 
-Edit `user_data/config.json` and replace all `CHANGE_THIS` values:
-
-- Exchange credentials (API key + secret)
+Edit `user_data/config.json` and replace all `CHANGE_THIS` placeholders:
+- Exchange API key and secret (read + trade only — never enable withdrawals)
 - Telegram bot token and chat ID
 - Freqtrade API password
-- JWT secret key (random 32+ char string)
-- Your trading pair whitelist
+- JWT secret key (`openssl rand -hex 32`)
+- Trading pair whitelist
 
-Edit `docker-compose.yml` and replace all `CHANGE_THIS` values:
-
-- `SECRET_TOKEN` — random string for webhook authentication
-- `TELEGRAM_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `FREQTRADE_PASS` — must match `config.json` API password
-
-### 3. Generate secure values
+### 3. Generate secrets
 
 ```bash
-# Webhook secret token
+# Secret token for webhook auth
 openssl rand -hex 24
 
-# Freqtrade JWT secret
+# JWT secret for Freqtrade UI
 openssl rand -hex 32
 ```
 
 ### 4. Start
 
+**VPS / standard:**
 ```bash
 docker compose up -d
 ```
 
-### 5. Set up TradingView alerts
-
-#### Add the indicator
-
-1. Open TradingView → your chart (e.g. SOLUSDT, 4H)
-2. Click **Indicators** → search **"IADSS Confluence Monitor"** → add it
-   - Direct link: https://www.tradingview.com/script/GzeIM5db-IADSS-Confluence-Monitor/
-
-#### Create alerts (2 required, 2 optional)
-
-**Required — trade execution:**
-
-| Alert name | Condition | Webhook URL |
-|---|---|---|
-| IADSS BUY | `BUY Sequence Complete` | `https://your-domain/lb-buy?token=YOUR_TOKEN` |
-| IADSS SELL | `SELL Sequence Complete` | `https://your-domain/lb-sell?token=YOUR_TOKEN` |
-
-**Optional — early warning Telegram notifications:**
-
-| Alert name | Condition | Webhook URL |
-|---|---|---|
-| IADSS BUY Early Warning | `BUY Early Warning` | `https://your-domain/confirm-buy?token=YOUR_TOKEN` |
-| IADSS SELL Early Warning | `SELL Early Warning` | `https://your-domain/confirm-sell?token=YOUR_TOKEN` |
-
-**Alert settings:**
-
-- Expiration: Open-ended
-- Alert actions: Webhook URL only
-- Message body:
-  ```json
-  {"pair": "SOL/USD"}
-  ```
-
-### 6. Access Freqtrade UI
-
-Open `http://localhost:8067` in your browser.
-
-### 7. Go live
-
-When happy with dry run performance:
-
-1. Set `"dry_run": false` in `config.json`
-2. Restart: `docker compose restart freqtrade`
-
----
-
-## Self-hosted setup (Unraid / home server)
-
-Use `docker-compose.selfhosted.yml` instead of the default compose file.
-This version uses a Cloudflare Tunnel for external access instead of a reverse proxy,
-so no ports are exposed to the internet directly.
-
+**Self-hosted (Unraid, NAS, home server):**
 ```bash
 docker compose -f docker-compose.selfhosted.yml up -d
 ```
 
-Freqtrade UI is accessible on port `8067` on your local network.
-The signal-tracker webhook server is reachable via your Cloudflare Tunnel URL.
+### 5. Access Freqtrade UI
+### 6. Go live
 
----
+Test thoroughly with `"dry_run": true` first. When ready:
 
-## Position sizing
+1. Set `"dry_run": false` in `user_data/config.json`
+2. `docker compose restart`
 
-- Each buy stakes **a configurable % of your available balance** at the time of the signal (set via `STAKE_RATIO`, default `0.5` = 50%)
-- Each sell exits **a configurable % of the current open position** (set via `SELL_RATIO`, default `0.5` = 50%)
-- Supports multiple buys on the same pair (DCA / pyramiding)
-- Minimum stake enforced by `MIN_STAKE` env var (default `$10`)
+## Self-hosted deployment
 
-To adjust, set these in your `docker-compose.yml` environment block:
+`docker-compose.selfhosted.yml` uses Cloudflare Tunnel instead of open ports — no port forwarding needed, works behind CGNAT, Cloudflare handles HTTPS.
 
-```yaml
-STAKE_RATIO: "0.25"   # buy 25% of free balance per signal
-SELL_RATIO: "1.0"     # sell 100% of position on exit
-MIN_STAKE: "20"       # minimum USD stake
-```
+Two options:
+- **Option A** — You already have a Cloudflare Tunnel container running (e.g. Unraid Community App). Set `DOCKER_NETWORK` in `.env`.
+- **Option B** — Fresh setup. Create a tunnel in Cloudflare Zero Trust, add the token to `.env` as `CLOUDFLARE_TUNNEL_TOKEN`, and uncomment the `cloudflared` service.
+
+In Cloudflare Zero Trust → Tunnels → your tunnel → Public Hostnames:
+## Security
+
+- All trade endpoints require `SECRET_TOKEN` (URL param or `X-Token` header)
+- Rate limiting: 10/min on trade endpoints, 30/min on early warnings, 60/min on status
+- Pair validation: rejects malformed pair names
+- Never enable withdrawal permissions on exchange API keys
+- The `.env` file is gitignored — never commit it
 
 ## Adding more pairs
 
+Add pairs to the whitelist in `config.json`:
 ```json
 "pair_whitelist": ["SOL/USD", "BTC/USD", "ETH/USD"]
 ```
 
-Create separate TradingView alerts for each pair with the pair name in the message body.
-
----
-
-## Security
-
-- All webhook endpoints require `?token=YOUR_SECRET_TOKEN` in the URL
-- Freqtrade UI should be behind a reverse proxy or Cloudflare Tunnel — never exposed directly
-- **Never enable withdrawal permissions on your exchange API keys**
-- Never commit `.env` or `user_data/` — both are gitignored
-- Use `openssl rand -hex 24` to generate your secret token
-
----
-
-## Telegram notifications
-
-Once your Telegram bot is configured you will receive:
-
-- BUY and SELL early warnings (if confirm alerts are set up)
-- Trade execution confirmations with stake, rate, and trade ID
-- Failure alerts with reason
-
-You can also send commands directly to your Freqtrade bot:
-
-- `/status` — open trades
-- `/profit` — profit summary
-- `/balance` — current balance
-- `/stop` — stop the bot
-- `/start` — start the bot
-
----
-
-## Acknowledgements
-
-A huge thank you to **[Gregusm](https://www.tradingview.com/u/gregusm/)** for creating the
-**IADSS Confluence Monitor**
-([view on TradingView](https://www.tradingview.com/script/GzeIM5db-IADSS-Confluence-Monitor/)).
-
-This project was originally built with a custom 3-step state machine to sequence Mean Reversion,
-Confluence, and Trend flip signals server-side. Following an external audit, we switched to
-Gregusm's indicator which handles the entire sequence on the chart — producing cleaner signals
-with no server-side state to manage or expire.
-
-If you find his work useful, please give it a like and follow him on TradingView.
-
----
+Create separate TradingView alerts for each pair with the pair name in the message body:
+```json
+{"pair": "BTC/USD"}
+```
 
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
 
----
+## Acknowledgements
+
+Signal sequencing powered by the [IADSS Confluence Monitor](https://www.tradingview.com/script/GzeIM5db-IADSS-Confluence-Monitor/) by Gregusm.
 
 ## ⚠️ Disclaimer
 
-This software is for educational and informational purposes only. It is not financial advice.
-Trading cryptocurrencies and other financial instruments involves significant risk of loss.
-Past performance is not indicative of future results. You may lose some or all of your invested capital.
-
-By using this software you acknowledge that:
-
-- You are solely responsible for your trading decisions
-- The authors accept no liability for any financial losses incurred
-- You should never trade with money you cannot afford to lose
-- This software comes with no guarantee of profit or performance
-- You should seek independent financial advice before trading
-
-**Use at your own risk.**
-
+This software is for educational purposes only and is not financial advice. Trading involves significant risk of loss. You are solely responsible for your trading decisions. The authors accept no liability for any financial losses. Never trade with money you cannot afford to lose. Test thoroughly in dry-run mode before going live.
