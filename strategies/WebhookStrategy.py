@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class WebhookStrategy(IStrategy):
     INTERFACE_VERSION = 3
-    timeframe = '5m'
+    timeframe = '4h'
     stoploss = -0.10
     minimal_roi = {"0": 100}
     process_only_new_candles = False
