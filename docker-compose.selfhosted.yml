@@ -1,40 +1,41 @@
-# IADSS Signal Tracker — Self-hosted (Unraid / home server)
-# Uses Cloudflare Tunnel for external access — no open ports on your router.
+# IADSS — Self-hosted path (Unraid, NAS, Raspberry Pi, home server)
+# Uses Cloudflare Tunnel instead of open ports — works behind CGNAT,
+# Cloudflare handles HTTPS automatically.
 #
 # Prerequisites:
-#   1. Fill in your values in .env
-#   2. Run: docker compose -f docker-compose.selfhosted.yml up -d
+#   1. Copy .env.example to .env and fill in your values
+#   2. Choose your Cloudflare Tunnel option below (A or B)
+#   3. Run: docker compose -f docker-compose.selfhosted.yml up -d
 #
 # Unraid auto-start on boot — add to /boot/config/go:
 #   cd /mnt/user/appdata/IADSS-Signal-Tracker && docker compose -f docker-compose.selfhosted.yml up -d
 #
-# ── Cloudflare Tunnel ────────────────────────────────────────────────────────
+# ── Cloudflare Tunnel options ────────────────────────────────────────────────
 #
 # OPTION A — You already have a Cloudflare Tunnel container running on Unraid
 #   (e.g. the figro/unraid-cloudflared-tunnel Community App)
 #   1. Set DOCKER_NETWORK in .env to your tunnel container's Docker network name
-#   2. In Cloudflare Zero Trust → Tunnels → your tunnel → Public Hostnames:
-#        signals.yourdomain.com  →  http://YOUR_SERVER_IP:5000
-#        trade.yourdomain.com    →  http://YOUR_SERVER_IP:8067
+#   2. The cloudflared service below stays commented out
+#   3. In Cloudflare Zero Trust → Tunnels → your tunnel → Public Hostnames:
+#        signals.yourdomain.com  →  http://signal-tracker:5000
+#        trade.yourdomain.com    →  http://freqtrade:8080
 #
-# OPTION B — You don't have cloudflared running yet
+# OPTION B — You don't have cloudflared running yet (fresh setup)
 #   1. Go to Cloudflare Zero Trust → Networks → Tunnels → Create tunnel
 #   2. Copy the token and add it to .env as CLOUDFLARE_TUNNEL_TOKEN
 #   3. Uncomment the cloudflared service at the bottom of this file
-#   4. Remove the networks: key from each service block and delete the
-#      top-level networks: block entirely
-#   5. In Cloudflare public hostnames point to:
+#   4. Remove the external network block and replace with an internal network
+#   5. In Cloudflare Zero Trust → Tunnels → your tunnel → Public Hostnames:
 #        signals.yourdomain.com  →  http://signal-tracker:5000
 #        trade.yourdomain.com    →  http://freqtrade:8080
 
 services:
+
   # ── Freqtrade ───────────────────────────────────────────────────────────────
   freqtrade:
     image: freqtradeorg/freqtrade:stable
     container_name: freqtrade
     restart: unless-stopped
-    ports:
-      - "8067:8080"
     networks:
       - tunnel_network
     volumes:
@@ -51,10 +52,10 @@ services:
     build: .
     container_name: signal-tracker
     restart: unless-stopped
-    ports:
-      - "5000:5000"
     networks:
       - tunnel_network
+    ports:
+      - "5000:5000"
     environment:
       - SECRET_TOKEN=${SECRET_TOKEN}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
@@ -62,28 +63,36 @@ services:
       - FREQTRADE_API=http://freqtrade:8080/api/v1
       - FREQTRADE_USER=admin
       - FREQTRADE_PASS=${FREQTRADE_PASS}
+      - TRADING_PAIR=${TRADING_PAIR:-SOL/USD}
       - STAKE_RATIO=${STAKE_RATIO:-0.5}
       - SELL_RATIO=${SELL_RATIO:-0.5}
       - MIN_STAKE=${MIN_STAKE:-10}
     depends_on:
-      - freqtrade
+      freqtrade:
+        condition: service_started
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
 
-  # ── Cloudflare Tunnel (OPTION B only) ───────────────────────────────────────
+  # ── Cloudflare Tunnel (OPTION B only — uncomment if no cloudflared running) ──
   # cloudflared:
   #   image: cloudflare/cloudflared:latest
   #   container_name: IADSS_cloudflared
   #   restart: unless-stopped
   #   command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
   #   depends_on:
-  #     - signal-tracker
-  #     - freqtrade
+  #     signal-tracker:
+  #       condition: service_healthy
+  #     freqtrade:
+  #       condition: service_started
 
 networks:
   tunnel_network:
+    # OPTION A — join your existing Cloudflare Tunnel container's Docker network.
+    # Set DOCKER_NETWORK in .env to match (e.g. br0, ballzac, macvlan).
+    #
+    # OPTION B — delete this block and let Docker create the network automatically.
     name: ${DOCKER_NETWORK}
     external: true
