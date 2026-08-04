@@ -9,20 +9,31 @@ internally on the chart. This server receives the completion alerts and
 executes trades via the Freqtrade API.
 
 Endpoints:
-  POST /lb-buy        BUY Sequence Complete  -> executes buy  (50% of free balance)
-  POST /lb-sell       SELL Sequence Complete -> executes sell (50% of open position)
+  POST /lb-buy        BUY Sequence Complete  -> executes buy  (STAKE_RATIO of pair ledger)
+  POST /lb-sell       SELL Sequence Complete -> executes sell (SELL_RATIO of open position)
   POST /confirm-buy   BUY Early Warning      -> Telegram notification only
   POST /confirm-sell  SELL Early Warning     -> Telegram notification only
-  GET  /status        current open trade info from Freqtrade
+  GET  /status        current open trade + ledger info
+  GET  /ledger        all pair bankrolls, P&L summary
   GET  /health        health check
+
+Per-pair ledger (optional):
+  Set ALLOCATION_SOL_USD=1000 in .env to give SOL/USD its own $1000 bankroll.
+  Buys stake against that pair's ledger, not the total exchange balance.
+  Profits and losses stay isolated per pair — SOL gains never fund HYPE trades.
+  Omit the env var to fall back to free-balance mode (original behaviour).
 """
 
+import json
 import logging
 import os
 import re
+import threading
 import time
-import requests
+from datetime import datetime
 from functools import wraps
+
+import requests
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -42,12 +53,13 @@ FREQTRADE_PASS  = os.environ.get("FREQTRADE_PASS", "")
 TG_TOKEN        = os.environ.get("TELEGRAM_TOKEN", "")
 TG_CHAT         = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-STAKE_RATIO     = float(os.environ.get("STAKE_RATIO", "0.5"))   # % of free balance per buy
-SELL_RATIO      = float(os.environ.get("SELL_RATIO",  "0.5"))   # % of position per sell
-MIN_STAKE       = float(os.environ.get("MIN_STAKE",   "10.0"))  # minimum USD stake
-API_RETRIES     = int(os.environ.get("API_RETRIES",   "3"))
-API_RETRY_DELAY = float(os.environ.get("API_RETRY_DELAY", "5.0"))
-API_TIMEOUT     = int(os.environ.get("API_TIMEOUT",   "15"))
+STAKE_RATIO     = float(os.environ.get("STAKE_RATIO",      "0.5"))
+SELL_RATIO      = float(os.environ.get("SELL_RATIO",       "0.5"))
+MIN_STAKE       = float(os.environ.get("MIN_STAKE",        "10.0"))
+API_RETRIES     = int(os.environ.get("API_RETRIES",        "3"))
+API_RETRY_DELAY = float(os.environ.get("API_RETRY_DELAY",  "5.0"))
+API_TIMEOUT     = int(os.environ.get("API_TIMEOUT",        "15"))
+LEDGER_FILE     = os.environ.get("LEDGER_FILE",            "/data/ledger.json")
 
 # -- Logging ------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -61,6 +73,75 @@ limiter = Limiter(
     default_limits=[],
     storage_uri="memory://",
 )
+
+# -- Ledger -------------------------------------------------------------------
+_ledger_lock = threading.Lock()
+
+def _pair_to_env_key(pair: str) -> str:
+    return "ALLOCATION_" + pair.replace("/", "_")
+
+def _load_ledger() -> dict:
+    if os.path.exists(LEDGER_FILE):
+        try:
+            with open(LEDGER_FILE) as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error("Failed to load ledger: %s", e)
+    return {}
+
+def _save_ledger(ledger: dict):
+    dirpath = os.path.dirname(LEDGER_FILE)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
+    with open(LEDGER_FILE, "w") as f:
+        json.dump(ledger, f, indent=2)
+
+def get_pair_entry(pair: str) -> dict | None:
+    with _ledger_lock:
+        ledger = _load_ledger()
+        if pair not in ledger:
+            env_key   = _pair_to_env_key(pair)
+            alloc_str = os.environ.get(env_key)
+            if not alloc_str:
+                return None
+            allocation = float(alloc_str)
+            ledger[pair] = {
+                "allocated": allocation,
+                "current":   allocation,
+                "in_trade":  0.0,
+                "created":   datetime.utcnow().isoformat(),
+                "updated":   datetime.utcnow().isoformat(),
+            }
+            _save_ledger(ledger)
+            logger.info("Ledger initialised: %s = $%.2f", pair, allocation)
+        return dict(ledger[pair])
+
+def _deduct_stake(pair: str, stake: float):
+    with _ledger_lock:
+        ledger = _load_ledger()
+        if pair in ledger:
+            ledger[pair]["current"]  -= stake
+            ledger[pair]["in_trade"] += stake
+            ledger[pair]["updated"]   = datetime.utcnow().isoformat()
+            _save_ledger(ledger)
+            logger.info("Ledger deducted: %s -$%.2f  current=$%.2f  in_trade=$%.2f",
+                pair, stake, ledger[pair]["current"], ledger[pair]["in_trade"])
+
+def _credit_sell(pair: str, sell_amount: float, open_rate: float, sell_rate: float) -> float:
+    cost_basis = sell_amount * open_rate
+    proceeds   = sell_amount * sell_rate
+    profit     = proceeds - cost_basis
+    with _ledger_lock:
+        ledger = _load_ledger()
+        if pair in ledger:
+            ledger[pair]["current"]  += proceeds
+            ledger[pair]["in_trade"] -= cost_basis
+            ledger[pair]["in_trade"]  = max(0.0, ledger[pair]["in_trade"])
+            ledger[pair]["updated"]   = datetime.utcnow().isoformat()
+            _save_ledger(ledger)
+            logger.info("Ledger credited: %s sold=%.4f profit=$%+.2f  current=$%.2f in_trade=$%.2f",
+                pair, sell_amount, profit, ledger[pair]["current"], ledger[pair]["in_trade"])
+    return profit
 
 # -- Telegram -----------------------------------------------------------------
 def telegram(msg: str):
@@ -77,8 +158,7 @@ def telegram(msg: str):
 
 # -- Freqtrade API helpers ----------------------------------------------------
 def _ft_request(method: str, endpoint: str, **kwargs) -> dict:
-    """Make a Freqtrade API request with retries."""
-    url = f"{FREQTRADE_API}/{endpoint.lstrip('/')}"
+    url  = f"{FREQTRADE_API}/{endpoint.lstrip('/')}"
     auth = (FREQTRADE_USER, FREQTRADE_PASS)
     last_error = None
     for attempt in range(1, API_RETRIES + 1):
@@ -94,44 +174,50 @@ def _ft_request(method: str, endpoint: str, **kwargs) -> dict:
     raise RuntimeError(f"Freqtrade API failed after {API_RETRIES} attempts: {last_error}")
 
 def get_free_balance() -> float:
-    """Return free stake currency balance available for trading."""
     data = _ft_request("GET", "/balance")
     return float(data.get("available_capital", data.get("total", 0)))
 
 def get_open_trade(pair: str):
-    """Return the open trade for a pair (most recent), or None."""
-    data = _ft_request("GET", "/status")
+    data   = _ft_request("GET", "/status")
     trades = [t for t in data if t["pair"] == pair and t["is_open"]]
     return sorted(trades, key=lambda t: t["open_date"])[-1] if trades else None
 
 # -- Trade execution ----------------------------------------------------------
 def execute_buy(pair: str) -> bool:
-    """Buy using STAKE_RATIO of free balance."""
     try:
-        free  = get_free_balance()
-        stake = round(free * STAKE_RATIO, 2)
+        entry = get_pair_entry(pair)
+        if entry is not None:
+            available = entry["current"]
+            mode      = f"ledger ${available:.2f}"
+        else:
+            available = get_free_balance()
+            mode      = f"free balance ${available:.2f}"
+
+        stake = round(available * STAKE_RATIO, 2)
 
         if stake < MIN_STAKE:
-            msg = (
-                f"IADSS BUY skipped for {pair}\n"
-                f"Free: ${free:.2f} -> stake ${stake:.2f} below ${MIN_STAKE:.0f} minimum"
-            )
+            msg = (f"IADSS BUY skipped — {pair}\n"
+                   f"Available ({mode}) -> stake ${stake:.2f} below ${MIN_STAKE:.0f} minimum")
             logger.warning(msg)
             telegram(msg)
             return False
 
-        logger.info("BUY %s: staking $%.2f (%.0f%% of $%.2f free)", pair, stake, STAKE_RATIO * 100, free)
+        logger.info("BUY %s: $%.2f stake (%.0f%% of %s)", pair, stake, STAKE_RATIO * 100, mode)
         result    = _ft_request("POST", "/forcebuy", json={"pair": pair, "stake_amount": stake})
         trade_id  = result.get("trade_id") or result.get("id", "?")
         open_rate = result.get("open_rate", "?")
 
-        telegram(
-            f"IADSS BUY executed\n"
-            f"Pair: {pair}\n"
-            f"Stake: ${stake:.2f} ({int(STAKE_RATIO*100)}% of ${free:.2f} free)\n"
-            f"Rate: {open_rate}\n"
-            f"Trade ID: {trade_id}"
-        )
+        if entry is not None:
+            _deduct_stake(pair, stake)
+            updated        = get_pair_entry(pair)
+            ledger_summary = (f"\nLedger: ${updated['current']:.2f} liquid  "
+                              f"${updated['in_trade']:.2f} in trade")
+        else:
+            ledger_summary = ""
+
+        telegram(f"IADSS BUY executed\nPair: {pair}\n"
+                 f"Stake: ${stake:.2f} ({int(STAKE_RATIO*100)}% of {mode})\n"
+                 f"Rate: {open_rate}\nTrade ID: {trade_id}{ledger_summary}")
         logger.info("BUY success: %s trade_id=%s stake=$%.2f", pair, trade_id, stake)
         return True
 
@@ -141,12 +227,10 @@ def execute_buy(pair: str) -> bool:
         return False
 
 def execute_sell(pair: str) -> bool:
-    """Sell SELL_RATIO of the current open position."""
     try:
         trade = get_open_trade(pair)
-
         if not trade:
-            msg = f"IADSS SELL skipped for {pair} -- no open trade found"
+            msg = f"IADSS SELL skipped -- {pair} -- no open trade found"
             logger.warning(msg)
             telegram(msg)
             return False
@@ -154,24 +238,32 @@ def execute_sell(pair: str) -> bool:
         trade_id     = str(trade["trade_id"])
         total_amount = float(trade["amount"])
         sell_amount  = round(total_amount * SELL_RATIO, 8)
-        current_rate = trade.get("current_rate", "?")
+        open_rate    = float(trade.get("open_rate", 0))
+        current_rate = float(trade.get("current_rate", 0)) if trade.get("current_rate") else 0.0
         profit_pct   = trade.get("current_profit_pct", 0) * 100
 
         logger.info("SELL %s: %.8f of %.8f trade_id=%s", pair, sell_amount, total_amount, trade_id)
         _ft_request("POST", "/forcesell", json={
-            "tradeid":   trade_id,
-            "ordertype": "market",
-            "amount":    sell_amount,
-        })
+            "tradeid": trade_id, "ordertype": "market", "amount": sell_amount})
 
-        telegram(
-            f"IADSS SELL executed\n"
-            f"Pair: {pair}\n"
-            f"Sold: {sell_amount:.4f} ({int(SELL_RATIO*100)}% of {total_amount:.4f})\n"
-            f"Rate: {current_rate} ({profit_pct:+.2f}%)\n"
-            f"Trade ID: {trade_id}"
-        )
-        logger.info("SELL success: %s sold %.8f", pair, sell_amount)
+        entry = get_pair_entry(pair)
+        if entry is not None and open_rate > 0 and current_rate > 0:
+            profit_abs = _credit_sell(pair, sell_amount, open_rate, current_rate)
+            updated    = get_pair_entry(pair)
+            total_pot  = updated["current"] + updated["in_trade"]
+            pnl        = total_pot - updated["allocated"]
+            ledger_summary = (f"\nLedger: ${updated['current']:.2f} liquid  "
+                              f"${updated['in_trade']:.2f} in trade"
+                              f"\nPot: ${total_pot:.2f}  (P&L: ${pnl:+.2f} vs ${updated['allocated']:.0f} start)")
+        else:
+            profit_abs     = 0.0
+            ledger_summary = ""
+
+        telegram(f"IADSS SELL executed\nPair: {pair}\n"
+                 f"Sold: {sell_amount:.4f} ({int(SELL_RATIO*100)}% of {total_amount:.4f})\n"
+                 f"Rate: {current_rate:.4f} ({profit_pct:+.2f}%)\n"
+                 f"This sell: ${profit_abs:+.2f}\nTrade ID: {trade_id}{ledger_summary}")
+        logger.info("SELL success: %s sold=%.8f profit=$%+.2f", pair, sell_amount, profit_abs)
         return True
 
     except Exception as e:
@@ -190,46 +282,34 @@ def require_token(f):
     return decorated
 
 # -- Endpoints ----------------------------------------------------------------
-
 @app.route("/confirm-buy", methods=["POST"])
 @limiter.limit("30 per minute")
 @require_token
 def confirm_buy():
-    """BUY Early Warning from Gregusm's indicator (MR + Confluence aligned)."""
     data = request.get_json(silent=True) or {}
     pair = data.get("pair", TRADING_PAIR)
     if not valid_pair(pair):
         return jsonify({"error": "invalid pair"}), 400
     logger.info("BUY early warning: %s", pair)
-    telegram(
-        f"IADSS BUY Early Warning\n"
-        f"MR + Confluence aligned -- waiting for trend flip\n"
-        f"Pair: {pair}"
-    )
+    telegram(f"IADSS BUY Early Warning\nMR + Confluence aligned -- waiting for trend flip\nPair: {pair}")
     return jsonify({"status": "ok", "message": "early_warning"}), 200
 
 @app.route("/confirm-sell", methods=["POST"])
 @limiter.limit("30 per minute")
 @require_token
 def confirm_sell():
-    """SELL Early Warning from Gregusm's indicator (MR + Confluence aligned)."""
     data = request.get_json(silent=True) or {}
     pair = data.get("pair", TRADING_PAIR)
     if not valid_pair(pair):
         return jsonify({"error": "invalid pair"}), 400
     logger.info("SELL early warning: %s", pair)
-    telegram(
-        f"IADSS SELL Early Warning\n"
-        f"MR + Confluence aligned -- waiting for trend flip\n"
-        f"Pair: {pair}"
-    )
+    telegram(f"IADSS SELL Early Warning\nMR + Confluence aligned -- waiting for trend flip\nPair: {pair}")
     return jsonify({"status": "ok", "message": "early_warning"}), 200
 
 @app.route("/lb-buy", methods=["POST"])
 @limiter.limit("10 per minute")
 @require_token
 def lb_buy():
-    """BUY Sequence Complete — all three steps confirmed, execute buy."""
     data = request.get_json(silent=True) or {}
     pair = data.get("pair", TRADING_PAIR)
     if not valid_pair(pair):
@@ -243,7 +323,6 @@ def lb_buy():
 @limiter.limit("10 per minute")
 @require_token
 def lb_sell():
-    """SELL Sequence Complete — all three steps confirmed, execute sell."""
     data = request.get_json(silent=True) or {}
     pair = data.get("pair", TRADING_PAIR)
     if not valid_pair(pair):
@@ -253,7 +332,6 @@ def lb_sell():
     success = execute_sell(pair)
     return jsonify({"status": "trade_executed" if success else "trade_failed"}), 200
 
-# -- Status -------------------------------------------------------------------
 @app.route("/status", methods=["GET"])
 @limiter.limit("60 per minute")
 @require_token
@@ -262,25 +340,71 @@ def status():
     try:
         trade = get_open_trade(pair)
         free  = get_free_balance()
+        entry = get_pair_entry(pair)
         trade_info = None
         if trade:
             trade_info = {
-                "trade_id":   trade["trade_id"],
-                "amount":     trade["amount"],
-                "open_rate":  trade["open_rate"],
+                "trade_id":     trade["trade_id"],
+                "amount":       trade["amount"],
+                "open_rate":    trade["open_rate"],
                 "current_rate": trade.get("current_rate"),
-                "profit_pct": round(trade.get("current_profit_pct", 0) * 100, 2),
-                "open_date":  trade["open_date"],
+                "profit_pct":   round(trade.get("current_profit_pct", 0) * 100, 2),
+                "open_date":    trade["open_date"],
+            }
+        ledger_info = None
+        if entry:
+            total = entry["current"] + entry["in_trade"]
+            ledger_info = {
+                "allocated":  entry["allocated"],
+                "current":    round(entry["current"],  2),
+                "in_trade":   round(entry["in_trade"], 2),
+                "total":      round(total, 2),
+                "pnl":        round(total - entry["allocated"], 2),
+                "next_stake": round(entry["current"] * STAKE_RATIO, 2),
             }
         return jsonify({
-            "pair":            pair,
-            "open_trade":      trade_info,
-            "free_balance":    round(free, 2),
-            "next_buy_stake":  round(free * STAKE_RATIO, 2),
-            "status":          "ok",
+            "pair":           pair,
+            "open_trade":     trade_info,
+            "free_balance":   round(free, 2),
+            "next_buy_stake": round((entry["current"] if entry else free) * STAKE_RATIO, 2),
+            "ledger":         ledger_info,
+            "status":         "ok",
         })
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/ledger", methods=["GET"])
+@limiter.limit("60 per minute")
+@require_token
+def ledger_view():
+    with _ledger_lock:
+        data = _load_ledger()
+    result = {}
+    grand_allocated = grand_total = 0.0
+    for pair, entry in data.items():
+        total = entry["current"] + entry["in_trade"]
+        pnl   = total - entry["allocated"]
+        result[pair] = {
+            "allocated":  round(entry["allocated"],  2),
+            "current":    round(entry["current"],    2),
+            "in_trade":   round(entry["in_trade"],   2),
+            "total":      round(total,               2),
+            "pnl":        round(pnl,                 2),
+            "pnl_pct":    round(pnl / entry["allocated"] * 100, 2) if entry["allocated"] else 0,
+            "next_stake": round(entry["current"] * STAKE_RATIO, 2),
+            "updated":    entry.get("updated"),
+        }
+        grand_allocated += entry["allocated"]
+        grand_total     += total
+    return jsonify({
+        "pairs": result,
+        "summary": {
+            "total_allocated": round(grand_allocated, 2),
+            "total_value":     round(grand_total,     2),
+            "total_pnl":       round(grand_total - grand_allocated, 2),
+        },
+        "status": "ok",
+    })
 
 @app.route("/health", methods=["GET"])
 def health():
