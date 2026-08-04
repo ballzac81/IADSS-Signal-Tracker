@@ -30,7 +30,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 
 import requests
@@ -60,7 +60,8 @@ API_RETRIES     = int(os.environ.get("API_RETRIES",        "3"))
 API_RETRY_DELAY = float(os.environ.get("API_RETRY_DELAY",  "5.0"))
 API_TIMEOUT     = int(os.environ.get("API_TIMEOUT",        "15"))
 LEDGER_FILE     = os.environ.get("LEDGER_FILE",            "/data/ledger.json")
-
+if not SECRET_TOKEN:
+    logger.warning("SECRET_TOKEN is not set — endpoints are UNAUTHENTICATED")
 # -- Logging ------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -109,8 +110,8 @@ def get_pair_entry(pair: str) -> dict | None:
                 "allocated": allocation,
                 "current":   allocation,
                 "in_trade":  0.0,
-                "created":   datetime.utcnow().isoformat(),
-                "updated":   datetime.utcnow().isoformat(),
+                "created":   datetime.now(timezone.utc),
+                "updated":   datetime.now(timezone.utc),
             }
             _save_ledger(ledger)
             logger.info("Ledger initialised: %s = $%.2f", pair, allocation)
@@ -122,7 +123,7 @@ def _deduct_stake(pair: str, stake: float):
         if pair in ledger:
             ledger[pair]["current"]  -= stake
             ledger[pair]["in_trade"] += stake
-            ledger[pair]["updated"]   = datetime.utcnow().isoformat()
+            ledger[pair]["updated"]   = datetime.now(timezone.utc)
             _save_ledger(ledger)
             logger.info("Ledger deducted: %s -$%.2f  current=$%.2f  in_trade=$%.2f",
                 pair, stake, ledger[pair]["current"], ledger[pair]["in_trade"])
@@ -137,7 +138,8 @@ def _credit_sell(pair: str, sell_amount: float, open_rate: float, sell_rate: flo
             ledger[pair]["current"]  += proceeds
             ledger[pair]["in_trade"] -= cost_basis
             ledger[pair]["in_trade"]  = max(0.0, ledger[pair]["in_trade"])
-            ledger[pair]["updated"]   = datetime.utcnow().isoformat()
+            ledger[pair]["updated"]   = datetime.now(timezone.utc)
+
             _save_ledger(ledger)
             logger.info("Ledger credited: %s sold=%.4f profit=$%+.2f  current=$%.2f in_trade=$%.2f",
                 pair, sell_amount, profit, ledger[pair]["current"], ledger[pair]["in_trade"])
