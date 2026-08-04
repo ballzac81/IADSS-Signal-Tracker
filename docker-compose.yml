@@ -43,6 +43,10 @@ services:
       - STAKE_RATIO=${STAKE_RATIO:-0.5}
       - SELL_RATIO=${SELL_RATIO:-0.5}
       - MIN_STAKE=${MIN_STAKE:-10}
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
     depends_on:
       freqtrade:
         condition: service_started
