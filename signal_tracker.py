@@ -120,8 +120,8 @@ def get_pair_entry(pair: str) -> dict | None:
                 "allocated": allocation,
                 "current":   allocation,
                 "in_trade":  0.0,
-                "created":   datetime.now(timezone.utc).isoformat()
-                "updated":   datetime.now(timezone.utc).isoformat()
+                "created":   datetime.now(timezone.utc).isoformat(),
+                "updated":   datetime.now(timezone.utc).isoformat(),
             }
             _save_ledger(ledger)
             logger.info("Ledger initialised: %s = $%.2f", pair, allocation)
@@ -133,7 +133,7 @@ def _deduct_stake(pair: str, stake: float):
         if pair in ledger:
             ledger[pair]["current"]  -= stake
             ledger[pair]["in_trade"] += stake
-            ledger[pair]["updated"]   = datetime.now(timezone.utc).isoformat()
+            ledger[pair]["updated"]   = datetime.now(timezone.utc).isoformat(),
             _save_ledger(ledger)
             logger.info("Ledger deducted: %s -$%.2f  current=$%.2f  in_trade=$%.2f",
                 pair, stake, ledger[pair]["current"], ledger[pair]["in_trade"])
