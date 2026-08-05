@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -133,7 +134,7 @@ def _deduct_stake(pair: str, stake: float):
         if pair in ledger:
             ledger[pair]["current"]  -= stake
             ledger[pair]["in_trade"] += stake
-            ledger[pair]["updated"]   = datetime.now(timezone.utc).isoformat(),
+            ledger[pair]["updated"]   = datetime.now(timezone.utc).isoformat()
             _save_ledger(ledger)
             logger.info("Ledger deducted: %s -$%.2f  current=$%.2f  in_trade=$%.2f",
                 pair, stake, ledger[pair]["current"], ledger[pair]["in_trade"])
