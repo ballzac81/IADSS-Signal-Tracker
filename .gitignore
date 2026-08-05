@@ -10,3 +10,6 @@ __pycache__/
 
 # Editor
 .DS_Store
+
+# Ledger runtime state — local balances, not for the repo
+data/
