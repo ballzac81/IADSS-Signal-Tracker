@@ -60,11 +60,13 @@ API_RETRIES     = int(os.environ.get("API_RETRIES",        "3"))
 API_RETRY_DELAY = float(os.environ.get("API_RETRY_DELAY",  "5.0"))
 API_TIMEOUT     = int(os.environ.get("API_TIMEOUT",        "15"))
 LEDGER_FILE     = os.environ.get("LEDGER_FILE",            "/data/ledger.json")
-if not SECRET_TOKEN:
-    logger.warning("SECRET_TOKEN is not set — endpoints are UNAUTHENTICATED")
+
 # -- Logging ------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+if not SECRET_TOKEN:
+    logger.warning("SECRET_TOKEN is not set — endpoints are UNAUTHENTICATED")
 
 # -- Flask --------------------------------------------------------------------
 app = Flask(__name__)
@@ -91,11 +93,19 @@ def _load_ledger() -> dict:
     return {}
 
 def _save_ledger(ledger: dict):
-    dirpath = os.path.dirname(LEDGER_FILE)
-    if dirpath:
-        os.makedirs(dirpath, exist_ok=True)
-    with open(LEDGER_FILE, "w") as f:
-        json.dump(ledger, f, indent=2)
+    dirpath = os.path.dirname(LEDGER_FILE) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dirpath, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(ledger, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, LEDGER_FILE)
+    except Exception:
+        os.unlink(tmp)
+        raise
+
 
 def get_pair_entry(pair: str) -> dict | None:
     with _ledger_lock:
@@ -110,8 +120,8 @@ def get_pair_entry(pair: str) -> dict | None:
                 "allocated": allocation,
                 "current":   allocation,
                 "in_trade":  0.0,
-                "created":   datetime.now(timezone.utc),
-                "updated":   datetime.now(timezone.utc),
+                "created":   datetime.now(timezone.utc).isoformat()
+                "updated":   datetime.now(timezone.utc).isoformat()
             }
             _save_ledger(ledger)
             logger.info("Ledger initialised: %s = $%.2f", pair, allocation)
@@ -123,7 +133,7 @@ def _deduct_stake(pair: str, stake: float):
         if pair in ledger:
             ledger[pair]["current"]  -= stake
             ledger[pair]["in_trade"] += stake
-            ledger[pair]["updated"]   = datetime.now(timezone.utc)
+            ledger[pair]["updated"]   = datetime.now(timezone.utc).isoformat()
             _save_ledger(ledger)
             logger.info("Ledger deducted: %s -$%.2f  current=$%.2f  in_trade=$%.2f",
                 pair, stake, ledger[pair]["current"], ledger[pair]["in_trade"])
@@ -138,7 +148,7 @@ def _credit_sell(pair: str, sell_amount: float, open_rate: float, sell_rate: flo
             ledger[pair]["current"]  += proceeds
             ledger[pair]["in_trade"] -= cost_basis
             ledger[pair]["in_trade"]  = max(0.0, ledger[pair]["in_trade"])
-            ledger[pair]["updated"]   = datetime.now(timezone.utc)
+            ledger[pair]["updated"]   = datetime.now(timezone.utc).isoformat()
 
             _save_ledger(ledger)
             logger.info("Ledger credited: %s sold=%.4f profit=$%+.2f  current=$%.2f in_trade=$%.2f",
