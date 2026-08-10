@@ -95,7 +95,7 @@ def _load_ledger() -> dict:
 
 def _save_ledger(ledger: dict):
     dirpath = os.path.dirname(LEDGER_FILE) or "."
-    os.makedirs(dirpath, exist_ok=true)
+    os.makedirs(dirpath, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=dirpath, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
