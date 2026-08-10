@@ -29,15 +29,22 @@ Additional endpoints:
 
 Create 4 alerts on the IADSS Confluence Monitor. Set each to fire "Once per bar close" and add your webhook URL.
 
-Webhook URL format:
+**Recommended (matches PTOS style)** — put the token in the message body:
 
-    https://signals.yourdomain.com/lb-buy?token=YOUR_SECRET_TOKEN
+Webhook URL:
 
-Webhook message body (JSON):
+    https://signals.yourdomain.com/lb-buy
 
-    {"pair": "SOL/USD"}
+Message body (JSON):
 
-For multi-pair setups, set the pair in the message body. The `token` can go in the URL or as an `X-Token` header.
+    {"pair": "SOL/USD", "token": "YOUR_SECRET_TOKEN"}
+
+**Also supported** (for backwards compatibility):
+
+- Token in the URL: `https://signals.yourdomain.com/lb-buy?token=YOUR_SECRET_TOKEN`
+- Header: `X-Token: YOUR_SECRET_TOKEN` or `X-Webhook-Secret: YOUR_SECRET_TOKEN`
+
+For multi-pair setups just change the `pair` value in the body.
 
 ## Position sizing
 
@@ -148,7 +155,7 @@ In Cloudflare Zero Trust -> Tunnels -> your tunnel -> Public Hostnames:
 
 ## Security
 
-- All trade endpoints require `SECRET_TOKEN` (URL param or `X-Token` header)
+- All trade endpoints require `SECRET_TOKEN` (accepted in URL, header, or JSON body)
 - Rate limiting: 10/min on trade endpoints, 30/min on early warnings, 60/min on status
 - Pair validation: rejects malformed pair names
 - Never enable withdrawal permissions on exchange API keys
@@ -162,7 +169,7 @@ Add pairs to the whitelist in `config.json`:
 
 Create separate TradingView alerts for each pair with the pair name in the message body:
 
-    {"pair": "BTC/USD"}
+    {"pair": "BTC/USD", "token": "YOUR_SECRET_TOKEN"}
 
 Optionally give each pair its own bankroll in `.env`:
 
