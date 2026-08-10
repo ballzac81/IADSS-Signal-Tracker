@@ -95,7 +95,7 @@ def _load_ledger() -> dict:
 
 def _save_ledger(ledger: dict):
     dirpath = os.path.dirname(LEDGER_FILE) or "."
-    os.makedirs(dirpath, exist_ok=True)
+    os.makedirs(dirpath, exist_ok=true)
     fd, tmp = tempfile.mkstemp(dir=dirpath, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
@@ -288,7 +288,19 @@ def execute_sell(pair: str) -> bool:
 def require_token(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = request.args.get("token") or request.headers.get("X-Token")
+        # Accept token the same way as PTOS for consistency:
+        # 1. URL query param  ?token=...
+        # 2. Header X-Token
+        # 3. Header X-Webhook-Secret (PTOS style)
+        # 4. JSON body {"token": "..."}
+        data = request.get_json(silent=True) or {}
+        token = (
+            request.args.get("token")
+            or request.headers.get("X-Token")
+            or request.headers.get("X-Webhook-Secret")
+            or data.get("token")
+            or ""
+        )
         if SECRET_TOKEN and token != SECRET_TOKEN:
             return jsonify({"error": "unauthorized"}), 401
         return f(*args, **kwargs)
