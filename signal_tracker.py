@@ -13,6 +13,8 @@ Endpoints:
   POST /lb-sell       SELL Sequence Complete -> executes sell (SELL_RATIO of open position)
   POST /confirm-buy   BUY Early Warning      -> Telegram notification only
   POST /confirm-sell  SELL Early Warning     -> Telegram notification only
+  POST /deposit       Add funds to a pair ledger
+  POST /withdraw      Remove funds from a pair ledger
   GET  /status        current open trade + ledger info
   GET  /ledger        all pair bankrolls, P&L summary
   GET  /health        health check
@@ -170,6 +172,67 @@ def _credit_sell(pair: str, sell_amount: float, open_rate: float, sell_rate: flo
             logger.info("Ledger credited: %s sold=%.4f profit=$%+.2f  current=$%.2f in_trade=$%.2f",
                 pair, sell_amount, profit, ledger[pair]["current"], ledger[pair]["in_trade"])
     return profit
+
+
+def deposit(pair: str, amount: float) -> dict:
+    """Add funds to a pair ledger. Increases both allocated and current."""
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    with _ledger_lock:
+        ledger = _load_ledger()
+        if pair not in ledger:
+            env_key = _pair_to_env_key(pair)
+            alloc_str = os.environ.get(env_key)
+            if alloc_str:
+                base = float(alloc_str)
+                ledger[pair] = {
+                    "allocated": base + amount,
+                    "current":   base + amount,
+                    "in_trade":  0.0,
+                    "created":   datetime.now(timezone.utc).isoformat(),
+                    "updated":   datetime.now(timezone.utc).isoformat(),
+                }
+            else:
+                ledger[pair] = {
+                    "allocated": amount,
+                    "current":   amount,
+                    "in_trade":  0.0,
+                    "created":   datetime.now(timezone.utc).isoformat(),
+                    "updated":   datetime.now(timezone.utc).isoformat(),
+                }
+            _save_ledger(ledger)
+            logger.info("Ledger created via deposit: %s = $%.2f", pair, ledger[pair]["allocated"])
+            return dict(ledger[pair])
+
+        ledger[pair]["allocated"] += amount
+        ledger[pair]["current"]   += amount
+        ledger[pair]["updated"]    = datetime.now(timezone.utc).isoformat()
+        _save_ledger(ledger)
+        logger.info("Deposit %s +$%.2f → allocated=$%.2f current=$%.2f",
+                    pair, amount, ledger[pair]["allocated"], ledger[pair]["current"])
+        return dict(ledger[pair])
+
+
+def withdraw(pair: str, amount: float) -> dict:
+    """Remove funds from a pair ledger. Decreases both allocated and current.
+    Only allowed from available (current) balance.
+    """
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    with _ledger_lock:
+        ledger = _load_ledger()
+        if pair not in ledger:
+            raise ValueError(f"no ledger for {pair}")
+        if ledger[pair]["current"] < amount:
+            raise ValueError(f"insufficient free balance (have ${ledger[pair]['current']:.2f})")
+
+        ledger[pair]["allocated"] = max(0.0, ledger[pair]["allocated"] - amount)
+        ledger[pair]["current"]  -= amount
+        ledger[pair]["updated"]   = datetime.now(timezone.utc).isoformat()
+        _save_ledger(ledger)
+        logger.info("Withdraw %s -$%.2f → allocated=$%.2f current=$%.2f",
+                    pair, amount, ledger[pair]["allocated"], ledger[pair]["current"])
+        return dict(ledger[pair])
 
 # -- Telegram -----------------------------------------------------------------
 def telegram(msg: str):
@@ -447,6 +510,70 @@ def ledger_view():
         },
         "status": "ok",
     })
+
+
+@app.route("/deposit", methods=["POST"])
+@limiter.limit("20 per minute")
+@require_token
+def deposit_endpoint():
+    data = request.get_json(silent=True) or {}
+    pair = data.get("pair", TRADING_PAIR)
+    amount = data.get("amount")
+    if not valid_pair(pair):
+        return jsonify({"error": "invalid pair"}), 400
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return jsonify({"error": "amount must be a number"}), 400
+    try:
+        entry = deposit(pair, amount)
+        telegram(f"IADSS DEPOSIT\nPair: {pair}\nAmount: +${amount:.2f}\n"
+                 f"Allocated: ${entry['allocated']:.2f}\nCurrent: ${entry['current']:.2f}")
+        return jsonify({
+            "status": "ok",
+            "pair": pair,
+            "deposited": amount,
+            "allocated": round(entry["allocated"], 2),
+            "current": round(entry["current"], 2),
+            "in_trade": round(entry["in_trade"], 2),
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Deposit failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/withdraw", methods=["POST"])
+@limiter.limit("20 per minute")
+@require_token
+def withdraw_endpoint():
+    data = request.get_json(silent=True) or {}
+    pair = data.get("pair", TRADING_PAIR)
+    amount = data.get("amount")
+    if not valid_pair(pair):
+        return jsonify({"error": "invalid pair"}), 400
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return jsonify({"error": "amount must be a number"}), 400
+    try:
+        entry = withdraw(pair, amount)
+        telegram(f"IADSS WITHDRAW\nPair: {pair}\nAmount: -${amount:.2f}\n"
+                 f"Allocated: ${entry['allocated']:.2f}\nCurrent: ${entry['current']:.2f}")
+        return jsonify({
+            "status": "ok",
+            "pair": pair,
+            "withdrawn": amount,
+            "allocated": round(entry["allocated"], 2),
+            "current": round(entry["current"], 2),
+            "in_trade": round(entry["in_trade"], 2),
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Withdraw failed: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/health", methods=["GET"])
 def health():
