@@ -52,10 +52,22 @@ Position sizes are fully configurable via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STAKE_RATIO` | `0.5` | Fraction of available balance used per buy (0.5 = 50%) |
-| `SELL_RATIO` | `0.5` | Fraction of open position sold per sell signal (0.5 = 50%) |
+| `STAKE_RATIO` | `0.5` | Default fraction of available balance used per buy (0.5 = 50%) |
+| `SELL_RATIO` | `0.5` | Default fraction of open position sold per sell signal (0.5 = 50%) |
 | `MIN_STAKE` | `10` | Minimum USD stake -- skips buy if below this |
 | `TRADING_PAIR` | `SOL/USD` | Default pair if not specified in webhook body |
+
+### Per-pair ratio overrides
+
+You can override the ratios for individual pairs:
+
+    STAKE_RATIO=0.5                 # default for all pairs
+    SELL_RATIO=0.5
+
+    STAKE_RATIO_HYPE_USD=0.33       # HYPE uses 33% on buys
+    SELL_RATIO_HYPE_USD=0.33        # HYPE uses 33% on sells
+
+    # SOL and TAO will keep using the global 50%
 
 ## Per-pair ledger (isolated bankrolls)
 
