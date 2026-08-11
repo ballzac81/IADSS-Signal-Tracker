@@ -104,7 +104,7 @@ curl -X POST https://signals.yourdomain.com/withdraw \
 
 ### Seeding existing positions
 
-If you already hold coins before going live, tell the ledger about them so it doesn't over-allocate free cash:
+If you already hold coins before going live, tell the ledger about them so it does not over-allocate free cash:
 
 ```bash
 # You already hold 12.5 HYPE worth ~$450
