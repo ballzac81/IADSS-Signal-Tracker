@@ -23,8 +23,10 @@ Additional endpoints:
 |----------|--------|-------------|
 | `/status` | GET | Current open trade + ledger info for a pair |
 | `/ledger` | GET | All pair bankrolls, P&L summary |
-| `/deposit` | POST | Add funds to a pair ledger |
-| `/withdraw` | POST | Remove funds from a pair ledger |
+| `/deposit` | POST | Add cash to a pair ledger |
+| `/withdraw` | POST | Remove cash from a pair ledger |
+| `/position/add` | POST | Mark existing coins as already in a position |
+| `/position/remove` | POST | Stop tracking some coins as a managed position |
 | `/health` | GET | Health check (no auth) |
 
 ## TradingView alert setup
@@ -86,19 +88,7 @@ Check all pair balances any time:
 
     GET /ledger?token=YOUR_SECRET_TOKEN
 
-Example response:
-
-    {
-      "pairs": {
-        "SOL/USD": {"allocated": 1000, "current": 850, "in_trade": 250, "total": 1100, "pnl": 100},
-        "HYPE/USD": {"allocated": 1000, "current": 500, "in_trade": 500, "total": 1000, "pnl": 0}
-      },
-      "summary": {"total_allocated": 2000, "total_value": 2100, "total_pnl": 100}
-    }
-
-### Adding or removing funds later
-
-You can top-up or withdraw from any pair without breaking P&L tracking:
+### Adding or removing cash
 
 ```bash
 # Deposit $400 into SOL ledger
@@ -111,6 +101,25 @@ curl -X POST https://signals.yourdomain.com/withdraw \
   -H "Content-Type: application/json" \
   -d '{"pair": "HYPE/USD", "amount": 200, "token": "YOUR_SECRET_TOKEN"}'
 ```
+
+### Seeding existing positions
+
+If you already hold coins before going live, tell the ledger about them so it doesn't over-allocate free cash:
+
+```bash
+# You already hold 12.5 HYPE worth ~$450
+curl -X POST https://signals.yourdomain.com/position/add \
+  -H "Content-Type: application/json" \
+  -d '{"pair": "HYPE/USD", "amount": 12.5, "cost_usd": 450, "token": "YOUR_SECRET_TOKEN"}'
+
+# Later stop managing some of those coins via the bot
+curl -X POST https://signals.yourdomain.com/position/remove \
+  -H "Content-Type: application/json" \
+  -d '{"pair": "HYPE/USD", "amount": 5.0, "cost_usd": 180, "token": "YOUR_SECRET_TOKEN"}'
+```
+
+- `amount` = number of coins
+- `cost_usd` = approximate USD value of those coins (so free cash is adjusted correctly)
 
 Omit `ALLOCATION_*` vars to fall back to free-balance mode (stakes against total exchange balance).
 
