@@ -23,6 +23,8 @@ Additional endpoints:
 |----------|--------|-------------|
 | `/status` | GET | Current open trade + ledger info for a pair |
 | `/ledger` | GET | All pair bankrolls, P&L summary |
+| `/deposit` | POST | Add funds to a pair ledger |
+| `/withdraw` | POST | Remove funds from a pair ledger |
 | `/health` | GET | Health check (no auth) |
 
 ## TradingView alert setup
@@ -93,6 +95,22 @@ Example response:
       },
       "summary": {"total_allocated": 2000, "total_value": 2100, "total_pnl": 100}
     }
+
+### Adding or removing funds later
+
+You can top-up or withdraw from any pair without breaking P&L tracking:
+
+```bash
+# Deposit $400 into SOL ledger
+curl -X POST https://signals.yourdomain.com/deposit \
+  -H "Content-Type: application/json" \
+  -d '{"pair": "SOL/USD", "amount": 400, "token": "YOUR_SECRET_TOKEN"}'
+
+# Withdraw $200 from HYPE ledger (only from free cash)
+curl -X POST https://signals.yourdomain.com/withdraw \
+  -H "Content-Type: application/json" \
+  -d '{"pair": "HYPE/USD", "amount": 200, "token": "YOUR_SECRET_TOKEN"}'
+```
 
 Omit `ALLOCATION_*` vars to fall back to free-balance mode (stakes against total exchange balance).
 
