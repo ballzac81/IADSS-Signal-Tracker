@@ -2,11 +2,12 @@
     "max_open_trades": 10,
     "stake_currency": "USD",
     "stake_amount": "unlimited",
-    "tradable_balance_ratio": 0.5,
+    "tradable_balance_ratio": 1.0,
     "fiat_display_currency": "USD",
     "timeframe": "4h",
     "dry_run": true,
-    "dry_run_wallet": 1000,
+    "dry_run_wallet": 3000,
+    "fee": 0.0026,
     "cancel_open_orders_on_exit": false,
     "trading_mode": "spot",
     "order_types": {
@@ -36,7 +37,9 @@
         "key": "YOUR_EXCHANGE_API_KEY",
         "secret": "YOUR_EXCHANGE_API_SECRET",
         "pair_whitelist": [
-            "SOL/USD"
+            "SOL/USD",
+            "HYPE/USD",
+            "TAO/USD"
         ]
     },
     "pairlists": [
