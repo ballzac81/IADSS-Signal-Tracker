@@ -10,32 +10,37 @@
 # Unraid auto-start on boot — add to /boot/config/go:
 #   cd /mnt/user/appdata/IADSS-Signal-Tracker && docker compose -f docker-compose.selfhosted.yml up -d
 #
-# ── Cloudflare Tunnel options ────────────────────────────────────────────────
+# ── Cloudflare Tunnel options ────────────────────────────────
 #
 # OPTION A — You already have a Cloudflare Tunnel container running on Unraid
 #   (e.g. the figro/unraid-cloudflared-tunnel Community App)
 #   1. Set DOCKER_NETWORK in .env to your tunnel container's Docker network name
 #   2. The cloudflared service below stays commented out
 #   3. In Cloudflare Zero Trust → Tunnels → your tunnel → Public Hostnames:
-#        signals.yourdomain.com  →  http://signal-tracker:5000
-#        trade.yourdomain.com    →  http://freqtrade:8080
+#        Path must be EMPTY (do not paste the ^/blog example)
+#        Preferred (same Docker network as this stack):
+#          signals.yourdomain.com  →  HTTP  signal-tracker:5000
+#          freqtrade.yourdomain.com → HTTP  freqtrade:8080
+#        If the tunnel cannot resolve container DNS, publish 8067 (below) and use:
+#          freqtrade.yourdomain.com → HTTP  HOST_LAN_IP:8067
+#        Never point the Freqtrade hostname at host:8080 if another app (e.g. qBittorrent) owns it.
 #
 # OPTION B — You don't have cloudflared running yet (fresh setup)
 #   1. Go to Cloudflare Zero Trust → Networks → Tunnels → Create tunnel
 #   2. Copy the token and add it to .env as CLOUDFLARE_TUNNEL_TOKEN
 #   3. Uncomment the cloudflared service at the bottom of this file
 #   4. Remove the external network block and replace with an internal network
-#   5. In Cloudflare Zero Trust → Tunnels → your tunnel → Public Hostnames:
-#        signals.yourdomain.com  →  http://signal-tracker:5000
-#        trade.yourdomain.com    →  http://freqtrade:8080
+#   5. Public hostnames as above
 
 services:
 
-  # ── Freqtrade ───────────────────────────────────────────────────────────────
+  # ── Freqtrade ───────────────────────────────────────
   freqtrade:
     image: freqtradeorg/freqtrade:stable
     container_name: freqtrade
     restart: unless-stopped
+    ports:
+      - "8067:8080"
     networks:
       - tunnel_network
     volumes:
@@ -47,7 +52,7 @@ services:
       --config /freqtrade/user_data/config.json
       --strategy WebhookStrategy
 
-  # ── Signal Tracker ──────────────────────────────────────────────────────────
+  # ── Signal Tracker ─────────────────────────────────────
   signal-tracker:
     build: .
     container_name: signal-tracker
@@ -80,7 +85,7 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── Cloudflare Tunnel (OPTION B only — uncomment if no cloudflared running) ──
+  # ── Cloudflare Tunnel (OPTION B only — uncomment if no cloudflared running) ─
   # cloudflared:
   #   image: cloudflare/cloudflared:latest
   #   container_name: IADSS_cloudflared
