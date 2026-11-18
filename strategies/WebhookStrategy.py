@@ -9,7 +9,16 @@ logger = logging.getLogger(__name__)
 class WebhookStrategy(IStrategy):
     INTERFACE_VERSION = 3
     timeframe = '4h'
+
+    # Static 10% under entry until the trade is +12%.
+    # After that, trail 10% under the high. The stop only moves up.
+    # 0.12 > 0.10, so the first trailed stop is still about +0.8% over entry.
     stoploss = -0.10
+    trailing_stop = True
+    trailing_stop_positive = 0.10
+    trailing_stop_positive_offset = 0.12
+    trailing_only_offset_is_reached = True
+
     minimal_roi = {"0": 100}
     process_only_new_candles = False
     position_adjustment_enable = True
