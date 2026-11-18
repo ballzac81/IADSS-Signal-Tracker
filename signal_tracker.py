@@ -22,8 +22,10 @@ Endpoints:
   GET  /health          health check
 
 Sizing:
-  Buys use STAKE_RATIO (default 50%) of the live free stake currency on Kraken.
-  Sells use SELL_RATIO (default 50%) of the live free base-coin balance Kraken holds.
+  Buys use STAKE_RATIO (default 50%) of the live free stake currency.
+  Sells use SELL_RATIO (default 50%) of the total base-coin balance of that pair.
+  A resting stop-loss locks coins, so the sell uses total balance, not free.
+  Freqtrade can only sell coins that belong to an open trade.
   The per-pair ledger is bookkeeping only and is not used to size orders.
 
 Per-pair ratios (optional):
@@ -318,7 +320,7 @@ def get_currency_amount(currency: str, field: str = "free") -> float:
     return 0.0 if amount is None else amount
 
 def get_live_stake_free() -> float:
-    """Free stake-currency cash on Kraken (USD by default). Ignores the ledger."""
+    """Free stake-currency cash on the exchange. Ignores the ledger."""
     data = _ft_request("GET", "/balance")
     if not isinstance(data, dict):
         return 0.0
@@ -348,7 +350,7 @@ def get_open_trade(pair: str):
 def execute_buy(pair: str) -> bool:
     try:
         available = get_live_stake_free()
-        mode = f"live Kraken {STAKE_CURRENCY} ${available:.2f}"
+        mode = f"live {STAKE_CURRENCY} ${available:.2f}"
         ratio = get_stake_ratio(pair)
         stake = round(available * ratio, 2)
         if stake < MIN_STAKE:
@@ -371,20 +373,22 @@ def execute_buy(pair: str) -> bool:
 def execute_sell(pair: str) -> bool:
     try:
         base = pair.split("/", 1)[0]
-        held = get_currency_amount(base, "free")
+        # Total balance, not free. A stop on the exchange locks the coins,
+        # so "free" is often 0 while the trade is still open.
+        held = get_currency_amount(base, "balance")
         if held <= 0:
-            held = get_currency_amount(base, "balance")
+            held = get_currency_amount(base, "free")
         sell_ratio = get_sell_ratio(pair)
         target = round(held * sell_ratio, 8)
         if target <= 0:
-            msg = f"IADSS SELL skipped -- {pair} -- Kraken holds 0 {base}"
+            msg = f"IADSS SELL skipped -- {pair} -- exchange holds 0 {base}"
             logger.warning(msg)
             telegram(msg)
             return False
         # Newest trade first. Freqtrade can only exit coins it has a trade for.
         trades = list(reversed(get_open_trades(pair)))
         if not trades:
-            msg = (f"IADSS SELL skipped -- {pair} -- Kraken holds {held:.8f} {base} "
+            msg = (f"IADSS SELL skipped -- {pair} -- exchange holds {held:.8f} {base} "
                    f"but Freqtrade has no open trade to sell")
             logger.warning(msg)
             telegram(msg)
@@ -413,7 +417,7 @@ def execute_sell(pair: str) -> bool:
             current_rate = float(trade.get("current_rate") or 0)
             profit_pct = float(trade.get("current_profit_pct") or 0) * 100
         if sold_total <= 0:
-            msg = (f"IADSS SELL skipped -- {pair} -- Kraken holds {held:.8f} {base} "
+            msg = (f"IADSS SELL skipped -- {pair} -- exchange holds {held:.8f} {base} "
                    f"but the open trade amount is still 0 (order not filled)")
             logger.warning(msg)
             telegram(msg)
@@ -516,12 +520,11 @@ def status():
                 "allocated": entry["allocated"], "current": round(entry["current"], 2),
                 "in_trade": round(entry["in_trade"], 2), "total": round(total, 2),
                 "pnl": round(total - entry["allocated"], 2),
-                "next_stake": round(entry["current"] * get_stake_ratio(pair), 2),
             }
         return jsonify({
             "pair": pair, "open_trade": trade_info, "free_balance": round(free, 2),
             "next_buy_stake": round(free * get_stake_ratio(pair), 2),
-            "stake_source": "live_kraken",
+            "stake_source": "live_exchange",
             "ledger": ledger_info, "status": "ok",
         })
     except Exception as e:
@@ -543,7 +546,6 @@ def ledger_view():
             "in_trade": round(entry["in_trade"], 2), "total": round(total, 2),
             "pnl": round(pnl, 2),
             "pnl_pct": round(pnl / entry["allocated"] * 100, 2) if entry["allocated"] else 0,
-            "next_stake": round(entry["current"] * get_stake_ratio(pair), 2),
             "updated": entry.get("updated"),
         }
         grand_allocated += entry["allocated"]
