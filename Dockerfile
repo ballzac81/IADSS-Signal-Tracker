@@ -15,5 +15,6 @@ EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
 
-# Use gunicorn in production; single worker is fine since Flask state is in Redis/file
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "30", "signal_tracker:app"]
+# Single worker so ledger writes stay in one process.
+# Timeout must outlast Freqtrade retries (3 x 15s plus the delay between them).
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "90", "signal_tracker:app"]
