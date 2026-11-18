@@ -21,10 +21,10 @@ Endpoints:
   GET  /ledger          all pair bankrolls, P&L summary
   GET  /health          health check
 
-Per-pair ledger (optional):
-  Set ALLOCATION_SOL_USD=1000 in .env to give SOL/USD its own $1000 bankroll.
-  Buys stake against that pair's ledger, not the total exchange balance.
-  Profits and losses stay isolated per pair.
+Sizing:
+  Buys use STAKE_RATIO (default 50%) of the live free stake currency on Kraken.
+  Sells use SELL_RATIO (default 50%) of the live free base-coin balance Kraken holds.
+  The per-pair ledger is bookkeeping only and is not used to size orders.
 
 Per-pair ratios (optional):
   STAKE_RATIO_HYPE_USD=0.33
@@ -62,6 +62,7 @@ TG_CHAT         = os.environ.get("TELEGRAM_CHAT_ID", "")
 STAKE_RATIO     = float(os.environ.get("STAKE_RATIO", "0.5"))
 SELL_RATIO      = float(os.environ.get("SELL_RATIO", "0.5"))
 MIN_STAKE       = float(os.environ.get("MIN_STAKE", "10.0"))
+STAKE_CURRENCY  = os.environ.get("STAKE_CURRENCY", "USD").upper()
 
 def get_stake_ratio(pair: str) -> float:
     key = "STAKE_RATIO_" + pair.replace("/", "_")
@@ -287,24 +288,67 @@ def _ft_request(method: str, endpoint: str, **kwargs) -> dict:
                 time.sleep(API_RETRY_DELAY)
     raise RuntimeError(f"Freqtrade API failed after {API_RETRIES} attempts: {last_error}")
 
-def get_free_balance() -> float:
+def _currencies(data: dict) -> list:
+    rows = data.get("currencies") if isinstance(data, dict) else None
+    return rows if isinstance(rows, list) else []
+
+def _currency_from_balance(data: dict, currency: str, field: str = "free"):
+    """Return the live amount, or None if that currency is not in the payload."""
+    want = currency.upper()
+    aliases = {want}
+    if want == "USD":
+        aliases.add("ZUSD")
+    found = False
+    total = 0.0
+    for row in _currencies(data):
+        code = str(row.get("currency") or "").upper()
+        if code not in aliases or row.get("is_position"):
+            continue
+        found = True
+        try:
+            total += float(row.get(field) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total if found else None
+
+def get_currency_amount(currency: str, field: str = "free") -> float:
+    """Live exchange amount for one currency from Freqtrade /balance."""
     data = _ft_request("GET", "/balance")
-    return float(data.get("available_capital", data.get("total", 0)))
+    amount = _currency_from_balance(data, currency, field)
+    return 0.0 if amount is None else amount
+
+def get_live_stake_free() -> float:
+    """Free stake-currency cash on Kraken (USD by default). Ignores the ledger."""
+    data = _ft_request("GET", "/balance")
+    if not isinstance(data, dict):
+        return 0.0
+    stake = str(data.get("stake") or STAKE_CURRENCY).upper()
+    free = _currency_from_balance(data, stake, "free")
+    if free is not None:
+        return free
+    try:
+        return float(data.get("available_capital") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def get_free_balance() -> float:
+    return get_live_stake_free()
+
+def get_open_trades(pair: str) -> list:
+    data = _ft_request("GET", "/status")
+    if not isinstance(data, list):
+        return []
+    trades = [t for t in data if t.get("pair") == pair and t.get("is_open")]
+    return sorted(trades, key=lambda t: t.get("open_date") or "")
 
 def get_open_trade(pair: str):
-    data = _ft_request("GET", "/status")
-    trades = [t for t in data if t["pair"] == pair and t["is_open"]]
-    return sorted(trades, key=lambda t: t["open_date"])[-1] if trades else None
+    trades = get_open_trades(pair)
+    return trades[-1] if trades else None
 
 def execute_buy(pair: str) -> bool:
     try:
-        entry = get_pair_entry(pair)
-        if entry is not None:
-            available = entry["current"]
-            mode = f"ledger ${available:.2f}"
-        else:
-            available = get_free_balance()
-            mode = f"free balance ${available:.2f}"
+        available = get_live_stake_free()
+        mode = f"live Kraken {STAKE_CURRENCY} ${available:.2f}"
         ratio = get_stake_ratio(pair)
         stake = round(available * ratio, 2)
         if stake < MIN_STAKE:
@@ -316,13 +360,7 @@ def execute_buy(pair: str) -> bool:
         result = _ft_request("POST", "/forcebuy", json={"pair": pair, "stake_amount": stake, "stakeamount": stake})
         trade_id = result.get("trade_id") or result.get("id", "?")
         open_rate = result.get("open_rate", "?")
-        if entry is not None:
-            _deduct_stake(pair, stake)
-            updated = get_pair_entry(pair)
-            ledger_summary = (f"\nLedger: ${updated['current']:.2f} liquid  ${updated['in_trade']:.2f} in trade")
-        else:
-            ledger_summary = ""
-        telegram(f"IADSS BUY executed\nPair: {pair}\nStake: ${stake:.2f} ({int(ratio*100)}% of {mode})\nRate: {open_rate}\nTrade ID: {trade_id}{ledger_summary}")
+        telegram(f"IADSS BUY executed\nPair: {pair}\nStake: ${stake:.2f} ({int(ratio*100)}% of {mode})\nRate: {open_rate}\nTrade ID: {trade_id}")
         logger.info("BUY success: %s trade_id=%s stake=$%.2f", pair, trade_id, stake)
         return True
     except Exception as e:
@@ -332,35 +370,61 @@ def execute_buy(pair: str) -> bool:
 
 def execute_sell(pair: str) -> bool:
     try:
-        trade = get_open_trade(pair)
-        if not trade:
-            msg = f"IADSS SELL skipped -- {pair} -- no open trade found"
+        base = pair.split("/", 1)[0]
+        held = get_currency_amount(base, "free")
+        if held <= 0:
+            held = get_currency_amount(base, "balance")
+        sell_ratio = get_sell_ratio(pair)
+        target = round(held * sell_ratio, 8)
+        if target <= 0:
+            msg = f"IADSS SELL skipped -- {pair} -- Kraken holds 0 {base}"
             logger.warning(msg)
             telegram(msg)
             return False
-        trade_id = str(trade["trade_id"])
-        total_amount = float(trade["amount"])
-        sell_ratio = get_sell_ratio(pair)
-        sell_amount = round(total_amount * sell_ratio, 8)
-        open_rate = float(trade.get("open_rate", 0))
-        current_rate = float(trade.get("current_rate", 0)) if trade.get("current_rate") else 0.0
-        profit_pct = trade.get("current_profit_pct", 0) * 100
-        logger.info("SELL %s: %.8f of %.8f trade_id=%s", pair, sell_amount, total_amount, trade_id)
-        _ft_request("POST", "/forcesell", json={"tradeid": trade_id, "ordertype": "market", "amount": sell_amount})
-        entry = get_pair_entry(pair)
-        if entry is not None and open_rate > 0 and current_rate > 0:
-            profit_abs = _credit_sell(pair, sell_amount, open_rate, current_rate)
-            updated = get_pair_entry(pair)
-            total_pot = updated["current"] + updated["in_trade"]
-            pnl = total_pot - updated["allocated"]
-            ledger_summary = (f"\nLedger: ${updated['current']:.2f} liquid  ${updated['in_trade']:.2f} in trade"
-                              f"\nPot: ${total_pot:.2f}  (P&L: ${pnl:+.2f} vs ${updated['allocated']:.0f} start)")
-        else:
-            profit_abs = 0.0
-            ledger_summary = ""
-        telegram(f"IADSS SELL executed\nPair: {pair}\nSold: {sell_amount:.4f} ({int(sell_ratio*100)}% of {total_amount:.4f})\n"
-                 f"Rate: {current_rate:.4f} ({profit_pct:+.2f}%)\nThis sell: ${profit_abs:+.2f}\nTrade ID: {trade_id}{ledger_summary}")
-        logger.info("SELL success: %s sold=%.8f profit=$%+.2f", pair, sell_amount, profit_abs)
+        # Newest trade first. Freqtrade can only exit coins it has a trade for.
+        trades = list(reversed(get_open_trades(pair)))
+        if not trades:
+            msg = (f"IADSS SELL skipped -- {pair} -- Kraken holds {held:.8f} {base} "
+                   f"but Freqtrade has no open trade to sell")
+            logger.warning(msg)
+            telegram(msg)
+            return False
+        remaining = target
+        sold_total = 0.0
+        last_id = "?"
+        current_rate = 0.0
+        profit_pct = 0.0
+        open_rate = 0.0
+        for trade in trades:
+            if remaining <= 1e-12:
+                break
+            trade_amt = float(trade.get("amount") or 0)
+            if trade_amt <= 0:
+                continue
+            chunk = round(min(remaining, trade_amt), 8)
+            trade_id = str(trade["trade_id"])
+            logger.info("SELL %s: %.8f of live %.8f %s (%.0f%%) trade_id=%s trade_amount=%.8f",
+                        pair, chunk, held, base, sell_ratio * 100, trade_id, trade_amt)
+            _ft_request("POST", "/forcesell", json={"tradeid": trade_id, "ordertype": "market", "amount": chunk})
+            remaining = round(remaining - chunk, 8)
+            sold_total = round(sold_total + chunk, 8)
+            last_id = trade_id
+            open_rate = float(trade.get("open_rate") or 0)
+            current_rate = float(trade.get("current_rate") or 0)
+            profit_pct = float(trade.get("current_profit_pct") or 0) * 100
+        if sold_total <= 0:
+            msg = (f"IADSS SELL skipped -- {pair} -- Kraken holds {held:.8f} {base} "
+                   f"but the open trade amount is still 0 (order not filled)")
+            logger.warning(msg)
+            telegram(msg)
+            return False
+        note = ""
+        if remaining > 1e-8:
+            note = f"\nNote: wanted {target:.8f} {base} but Freqtrade only tracks {sold_total:.8f}"
+        profit_abs = (sold_total * (current_rate - open_rate)) if open_rate > 0 and current_rate > 0 else 0.0
+        telegram(f"IADSS SELL executed\nPair: {pair}\nSold: {sold_total:.4f} ({int(sell_ratio*100)}% of live {held:.4f} {base})\n"
+                 f"Rate: {current_rate:.4f} ({profit_pct:+.2f}%)\nThis sell: ${profit_abs:+.2f}\nTrade ID: {last_id}{note}")
+        logger.info("SELL success: %s sold=%.8f of live %.8f profit=$%+.2f", pair, sold_total, held, profit_abs)
         return True
     except Exception as e:
         logger.error("SELL failed for %s: %s", pair, e)
@@ -456,7 +520,8 @@ def status():
             }
         return jsonify({
             "pair": pair, "open_trade": trade_info, "free_balance": round(free, 2),
-            "next_buy_stake": round((entry["current"] if entry else free) * get_stake_ratio(pair), 2),
+            "next_buy_stake": round(free * get_stake_ratio(pair), 2),
+            "stake_source": "live_kraken",
             "ledger": ledger_info, "status": "ok",
         })
     except Exception as e:
