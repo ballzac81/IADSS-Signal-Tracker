@@ -22,7 +22,7 @@ A running container does not pick up git changes on its own. Rebuild `signal-tra
 | BUY early warning | `/confirm-buy` | Telegram only |
 | BUY | `/lb-buy` | Buy `STAKE_RATIO` of the live free stake currency |
 | SELL early warning | `/confirm-sell` | Telegram only |
-| SELL | `/lb-sell` | Sell `SELL_RATIO` of the live free base coin |
+| SELL | `/lb-sell` | Sell `SELL_RATIO` of that pair's coin balance |
 
 IADSS names those alerts "sequence complete" (MR + Confluence, then the trend flip). An ATR alert is just a buy or a sell. Both hit the same URLs.
 
@@ -36,23 +36,30 @@ IADSS names those alerts "sequence complete" (MR + Confluence, then the trend fl
 | `/position/remove` | POST | Stop tracking some coins as a managed position |
 | `/health` | GET | Health check (no auth) |
 
-`/status` reports `stake_source: live_kraken` and `next_buy_stake` from the live free balance. A buy log line says `live Kraken USD`, not `ledger`.
+`/status` reports `stake_source: live_exchange` and `next_buy_stake` from the live free balance. A buy log line looks like `live USD $500.00`. The ledger JSON has no buy size in it.
 
 ## ATR signals
 
-ATR uses this repo the same way IADSS does. Run it as its **own** compose stack so it does not share the IADSS container, database, or ledger.
+ATR uses this same tracker. It is not a different program. Run it as its **own** compose stack so it does not share the other bot's container, database, or ledger. Give that copy its own `container_name` and host ports. `FREQTRADE_API` inside the compose file stays `http://freqtrade:8080/api/v1`: that is the service name on that stack's network, not some other container called freqtrade.
 
-| | IADSS | ATR |
-|--|--------|-----|
+The published ports in this repo are:
+
+| File | Freqtrade UI | Webhook |
+|------|----------------|---------|
+| `docker-compose.yml` | host `8067` → `8080` | host `5001` → `5000` |
+| `docker-compose.selfhosted.yml` | host `8067` → `8080` | host `5000` → `5000` |
+
+One running second stack (ATR on Kraken) uses different ports so it can sit next to the first one:
+
+| | First stack | ATR example |
+|--|-------------|-------------|
 | Freqtrade container | `freqtrade` | `ATR_freqtrade` |
 | Signal tracker | `signal-tracker` | `ATR_signal-tracker` |
-| UI publish | host `8067` → container `8080` | host `8057` → container `8080` |
-| Webhook publish | host `5000` → container `5000` | host `5011` → container `5000` |
-| Public webhook | your IADSS hostname | `https://atr-signals.ballzac.uk` |
+| UI | host `8067` | host `8057` |
+| Webhook | host `5000` or `5001` | host `5011` |
+| Public webhook | your own hostname | `https://atr-signals.ballzac.uk` |
 
-Inside the ATR compose file, `FREQTRADE_API` stays `http://freqtrade:8080/api/v1`. That name is the service on the ATR network, not the other stack's container.
-
-Cloudflare for ATR points at the ATR signal-tracker, for example `http://HOST_LAN_IP:5011`. The path is empty. `/lb-buy` on port `5002` (or any port the container is not published on) returns 502.
+Use your own hostname. `atr-signals.ballzac.uk` is just that example. Point Cloudflare at the signal-tracker port of the stack that should receive the alert, with an empty path. A hostname aimed at the wrong port returns 502.
 
 ATR buy alert:
 
@@ -64,11 +71,11 @@ https://atr-signals.ballzac.uk/lb-buy
 {"pair": "HYPE/USD", "token": "YOUR_SECRET_TOKEN"}
 ```
 
-ATR sell alert is the same body posted to `/lb-sell`. Early warnings, if you want them, go to `/confirm-buy` and `/confirm-sell` and only send Telegram.
+The sell alert is the same body posted to `/lb-sell`. `/confirm-buy` and `/confirm-sell` only send Telegram.
 
-Whitelist `HYPE/USD` (or whichever pair the alert sends) on **that** bot. A buy is 50% of the USD that bot can see free on the exchange. A sell is 50% of the free base coin of that pair. The stop below applies to the open trade on that bot. None of this looks at other coins on the exchange account.
+Whitelist the pair on **that** bot. The buy, the sell, and the stop then apply to that bot's open trade only. They do not look at other coins on the exchange account.
 
-Copy `strategies/WebhookStrategy.py` into that stack's `user_data/strategies/` and restart only `ATR_freqtrade`. Rebuilding `signal-tracker` does not reload the strategy.
+Copy `strategies/WebhookStrategy.py` into that stack's `user_data/strategies/` and restart only that freqtrade container. Rebuilding `signal-tracker` does not reload the strategy.
 
 ## Dry run vs live
 
@@ -112,12 +119,12 @@ TradingView cannot reach a LAN IP such as `10.10.20.10`. Use the Cloudflare host
 There is no "fire now" button on an existing alert. To test from TradingView, create a one-shot price-cross alert with the same URL and JSON. To test without TradingView:
 
 ```bash
-curl -X POST http://127.0.0.1:5011/lb-buy \
+curl -X POST http://127.0.0.1:5001/lb-buy \
   -H "Content-Type: application/json" \
   -d '{"pair": "HYPE/USD", "token": "YOUR_SECRET_TOKEN"}'
 ```
 
-Use the host port of the stack you mean (`5000` for IADSS, `5011` for ATR).
+`5001` is the host port in `docker-compose.yml`. The self-hosted file publishes `5000`. A second stack uses whatever port you gave it.
 
 Compare to PTOS: this repo uses `/lb-buy` and `"pair": "HYPE/USD"`, not `/buy-signal` and `"coin": "HYPE"`.
 
@@ -128,7 +135,7 @@ Orders are sized from the live exchange balance Freqtrade reports. The per-pair 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STAKE_RATIO` | `0.5` | Fraction of **live free stake currency** (USD) per buy |
-| `SELL_RATIO` | `0.5` | Fraction of the **live free base coin** of that pair per sell |
+| `SELL_RATIO` | `0.5` | Fraction of the **total base-coin balance** of that pair per sell |
 | `STAKE_CURRENCY` | `USD` | Stake currency. Kraken USD is also read as `ZUSD` |
 | `MIN_STAKE` | `10` | Skip the buy if the computed stake is below this |
 | `TRADING_PAIR` | `SOL/USD` | Default pair if the webhook omits `pair` |
@@ -140,12 +147,13 @@ STAKE_RATIO_HYPE_USD=0.33
 SELL_RATIO_HYPE_USD=0.33
 ```
 
-`1` on a sell ratio sells the whole live free balance of that coin. Restart `signal-tracker` after changing these.
+`1` on a sell ratio sells the whole coin balance of that pair. Restart `signal-tracker` after changing these.
 
 Two limits:
 
 - A buy spends that fraction of the **same** free USD pot. Pairs do not have separate bankrolls. Two buys in a row, with nothing filled in between, can each try to spend 50% of whatever is still free.
-- A sell can only exit coins Freqtrade has in an open trade. Coins that were bought outside the bot, or filled while the bot crashed before it wrote a trade, are not sold. The log says so. If the entry order is still unfilled (`amount` is 0), the sell is skipped.
+- A sell is that fraction of the total coins the exchange holds for the pair. Free balance is the wrong number once a stop is resting, because the stop locks the coins. Freqtrade still only sells what an open trade covers. Coins bought outside the bot, or filled while the bot crashed before it wrote a trade, are not sold. The log says so. If the entry order is still unfilled (`amount` is 0), the sell is skipped.
+- The included config sets `position_adjustment_enable`, which partial sells need. Turning that off makes a 50% sell fail.
 
 Freqtrade must receive the stake on **`stakeamount`** (and `stake_amount`). If only `stake_amount` is sent, current Freqtrade ignores it and falls back to `available / max_open_trades`. This repo sends both keys.
 
@@ -169,7 +177,7 @@ Also set in `user_data/config.json`:
 | Until the trade is +12% | 10% under the entry. Does not move |
 | From +12% on | 10% under the highest price since entry. Only moves up |
 
-The first trailed stop is about 0.8% over the entry, so it is still green, and price can fall 10% from the high before it hits. That is the crash exit. The sell webhook is still how the indicator closes the trade. `minimal_roi` is `{"0": 100}`, so the bot will not take profit by itself.
+The first trailed stop is about 0.8% over the entry, so it is still green, and price can fall 10% from the high before it hits. That is the crash exit. The sell webhook is still how the indicator closes the trade. `minimal_roi` is `{"0": 100}`. That number is a ratio, so this is 10,000% and ROI never fires.
 
 `user_data/config.json` puts that stop on the exchange:
 
@@ -183,7 +191,7 @@ The first trailed stop is about 0.8% over the entry, so it is still green, and p
 }
 ```
 
-Freqtrade cancels and replaces the Kraken stop as the trail moves, about once a minute. If the bot is offline, the last stop stays on Kraken and can still fill, but it will not trail higher until the bot is back.
+Freqtrade cancels and replaces the exchange stop as the trail moves, about once a minute. If the bot is offline, the last stop stays on the exchange and can still fill, but it will not trail higher until the bot is back.
 
 The stop is only placed after the entry fills. Restarting freqtrade does not sell. It replaces the exchange stop, so there is a short gap with no stop.
 
@@ -227,7 +235,7 @@ cp strategies/WebhookStrategy.py user_data/strategies/
 
 Edit `user_data/config.json`:
 - Exchange API key and secret (read + trade only)
-- Telegram token and chat id
+- Telegram token and chat id. The template ships with `"telegram": {"enabled": false}`. Set `enabled` to `true` only after the token is real.
 - `api_server.password` (must match `.env` `FREQTRADE_PASS`)
 - JWT secret (`openssl rand -hex 32`)
 - Pair whitelist
@@ -258,9 +266,9 @@ A second stack (ATR) needs its own directory, `container_name`, and host ports. 
 
 ### 5. Access Freqtrade UI
 
-- VPS: `http://YOUR_SERVER_IP:8067`
-- Self-hosted IADSS: `https://freqtrade.yourdomain.com` or host port `8067`
-- ATR: host port `8057`
+- VPS (`docker-compose.yml`): UI `http://YOUR_SERVER_IP:8067`, webhooks on host port `5001`
+- Self-hosted file: UI host port `8067`, webhooks on host port `5000`
+- A second stack uses the ports you published. The ATR example is UI `8057` and webhooks `5011`
 - FreqUI "Bot Name" is a label. Username is `api_server.username` (default `admin`). Times in the UI are UTC.
 
 ### 6. Go live
@@ -274,7 +282,7 @@ See [Dry run vs live](#dry-run-vs-live) above.
 - `signal-tracker` `5000:5000`
 - `freqtrade` `8067:8080` (host 8067 → container 8080)
 
-Freqtrade listens on **8080 inside the container**. Do not map host 8080 if qBittorrent (or anything else) already owns it.
+`docker-compose.yml` publishes the webhook on **5001**, not 5000. Freqtrade still listens on **8080 inside the container**. Do not map host 8080 if another app already owns it.
 
 Cloudflare public hostname for the UI:
 
@@ -290,7 +298,7 @@ Webhook hostname:
 signals.yourdomain.com  →  HTTP  signal-tracker:5000
 ```
 
-or `HOST_LAN_IP:5000`. ATR's hostname must point at the ATR signal-tracker port (`5011`), not this one.
+or `HOST_LAN_IP:5000` for the self-hosted file, and `:5001` for `docker-compose.yml`. A second stack's hostname must point at that stack's webhook port, not this one.
 
 ## Security
 
